@@ -278,3 +278,147 @@ def format_terminal_report(report: VerificationReport, no_color: bool = False) -
     lines.append("")
 
     return "\n".join(lines)
+
+
+def format_passport_terminal(passport: Any, no_color: bool = False) -> str:
+    """Format a ProofPassport into a clean, concise terminal artifact."""
+    use_color = _supports_color(no_color)
+
+    def color(text: str, code: str) -> str:
+        return f"{code}{text}{RESET}" if use_color else text
+
+    lines: list[str] = []
+    lines.append("")
+    lines.append(color("============================================================", BOLD + CYAN))
+    lines.append(color("                    AGENTPROOF PASSPORT                     ", BOLD + CYAN))
+    lines.append(color("============================================================", BOLD + CYAN))
+    lines.append("")
+
+    # Repository & Revision
+    repo_name = passport.repository.target_dir.replace("\\", "/").rstrip("/").split("/")[-1] or "repository"
+    lines.append(color("Repository:", BOLD))
+    lines.append(f"  {repo_name}")
+    lines.append("")
+
+    lines.append(color("Revision:", BOLD))
+    commit_rev = passport.repository.commit[:8] if passport.repository.commit else "uncommitted"
+    lines.append(f"  {commit_rev}")
+    lines.append("")
+
+    # Task
+    if passport.task and passport.task.description:
+        lines.append(color("Task:", BOLD))
+        lines.append(f"  {passport.task.description}")
+        lines.append("")
+
+    # Change
+    lines.append(color("CHANGE", BOLD))
+    lines.append(f"  {passport.change.files_count} files")
+    lines.append(f"  {passport.change.symbols_count} symbols")
+    lines.append("")
+
+    # Impact
+    lines.append(color("IMPACT", BOLD))
+    lines.append(f"  {passport.impact.rating}")
+    lines.append(f"  {passport.impact.impacted_callers_count} impacted callers")
+    lines.append("")
+
+    # Checks
+    lines.append(color("CHECKS", BOLD))
+    if not passport.checks:
+        lines.append("  (no checks executed)")
+    else:
+        for c in passport.checks:
+            c_color = GREEN if c.status == "PASS" else RED
+            lines.append(f"  {c.name:<18}  {color(c.status, c_color)}")
+    lines.append("")
+
+    # Findings
+    warnings_count = sum(1 for f in passport.findings if f.severity in ("WARNING", "MEDIUM", "LOW"))
+    failures_count = sum(1 for f in passport.findings if f.severity in ("HIGH", "CRITICAL", "FAIL"))
+    lines.append(color("FINDINGS", BOLD))
+    lines.append(f"  {warnings_count} warning{'s' if warnings_count != 1 else ''}")
+    lines.append(f"  {failures_count} failure{'s' if failures_count != 1 else ''}")
+    lines.append("")
+
+    # Evidence
+    lines.append(color("EVIDENCE", BOLD))
+    lines.append(f"  {len(passport.evidence)} evidence records")
+    lines.append("")
+
+    # Verdict
+    v_color = {
+        "VERIFIED": GREEN + BOLD,
+        "VERIFIED_WITH_WARNINGS": YELLOW + BOLD,
+        "FAILED": RED + BOLD,
+        "ERROR": RED + BOLD,
+        "INCONCLUSIVE": YELLOW + BOLD,
+    }.get(passport.verdict.status, WHITE + BOLD)
+
+    lines.append(color("VERDICT", BOLD))
+    lines.append(f"  {color(passport.verdict.status, v_color)}")
+    lines.append("")
+
+    lines.append("------------------------------------------------------------")
+    lines.append("Evidence and findings are traceable through the Proof Graph.")
+    lines.append(color("============================================================", BOLD + CYAN))
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_graph_terminal(graph: Any, no_color: bool = False) -> str:
+    """Format a ProofGraph summary into a structured terminal view."""
+    use_color = _supports_color(no_color)
+
+    def color(text: str, code: str) -> str:
+        return f"{code}{text}{RESET}" if use_color else text
+
+    lines: list[str] = []
+    lines.append("")
+    lines.append(color("============================================================", BOLD + CYAN))
+    lines.append(color("                   AGENTPROOF PROOF GRAPH                   ", BOLD + CYAN))
+    lines.append(color("============================================================", BOLD + CYAN))
+    lines.append("")
+
+    # Node count breakdown by type
+    from collections import Counter
+    node_counts = Counter(node.node_type.value for node in graph.nodes.values())
+    edge_counts = Counter(edge.relation.value for edge in graph.edges)
+
+    lines.append(color(f"Nodes ({len(graph.nodes)} total):", BOLD))
+    for ntype, count in sorted(node_counts.items()):
+        lines.append(f"  - {ntype:<16} {count}")
+    lines.append("")
+
+    lines.append(color(f"Relationships ({len(graph.edges)} total):", BOLD))
+    for rel, count in sorted(edge_counts.items()):
+        lines.append(f"  - {rel:<16} {count}")
+    lines.append("")
+
+    # Trace verdict
+    verdict_trace = graph.trace_verdict()
+    if verdict_trace.get("verdict"):
+        lines.append(color("Verdict Traceability:", BOLD))
+        lines.append(f"  {color(verdict_trace['verdict'], BOLD)}")
+        for factor in verdict_trace.get("factors", []):
+            f_label = factor["label"]
+            f_type = factor["factor_type"]
+            f_reason = factor.get("reason", "")
+            lines.append(f"    +-- [{f_type}] {f_label}")
+            if f_reason and f_reason != f_label:
+                lines.append(f"    |     Reason: {f_reason}")
+            for ev in factor.get("supporting_evidence", []):
+                lines.append(f"    |     +-- [EVIDENCE] {ev['label']}")
+        lines.append("")
+
+
+    # Integrity
+    integrity_hash = graph.metadata.get("graph_integrity_hash", "none")
+    lines.append(color("Graph Integrity:", BOLD))
+    lines.append(f"  Hash: {integrity_hash[:16]}...{integrity_hash[-8:]}" if len(integrity_hash) > 24 else f"  Hash: {integrity_hash}")
+    lines.append(color("============================================================", BOLD + CYAN))
+    lines.append("")
+
+    return "\n".join(lines)
+

@@ -26,6 +26,14 @@ from agentproof.core.models import (
     Verdict,
     VerificationReport,
 )
+from agentproof.graph.models import (
+    GraphEdge,
+    GraphNode,
+    NodeType,
+    ProofGraph,
+    RelationType,
+)
+from agentproof.passport.models import ProofPassport
 
 __all__ = [
     "ChangeImpact",
@@ -39,11 +47,17 @@ __all__ = [
     "FileCategory",
     "FileChange",
     "FileStatus",
+    "GraphEdge",
+    "GraphNode",
     "ImpactRelation",
     "ImpactedComponent",
     "MissingWorkCategory",
     "MissingWorkFinding",
     "MissingWorkReport",
+    "NodeType",
+    "ProofGraph",
+    "ProofPassport",
+    "RelationType",
     "RiskFinding",
     "RiskSeverity",
     "RiskWarning",
@@ -53,3 +67,4 @@ __all__ = [
     "Verdict",
     "VerificationReport",
 ]
+

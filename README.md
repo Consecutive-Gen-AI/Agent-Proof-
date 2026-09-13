@@ -18,57 +18,55 @@ AgentProof distinguishes between:
 
 ---
 
-## AgentProof V3 Capabilities
+## AgentProof V4 Capabilities
 
-AgentProof V3 introduces deterministic **Task-to-Change Drift Detection**, an evidence-based **Missing Work Analyzer**, and an expanded **8-Section Verification Report**:
+AgentProof V4 introduces the first real **Evidence Graph (Proof Graph)**, the **Proof Passport** system, and **Verdict Traceability** with deterministic integrity hashing:
 
-### 1. Task-to-Change Drift Detection
-Compares the intended task with actual repository changes:
 ```text
-TASK / INTENDED CHANGE
-        ↓
-EXPECTED CHANGE AREA
-        ↓
-ACTUAL CHANGE
-        ↓
-IMPACTED AREA
+TASK ──> CHANGE ──> IMPACT ──> CHECKS ──> EVIDENCE ──> FINDINGS ──> VERDICT
 ```
-- **Deterministic Alignment**: Extracts task keywords, explicit paths, symbol references, and domain categories (`auth`, `db`, `api`, `cli`, `ui`, `billing`, `test`).
-- **Explainable Findings**: Identifies files modified outside expected scope and explains *why* (no keyword match, no symbol link, outside impact graph).
-- **Drift Rating**: Computes `DriftLevel` (`NONE`, `LOW`, `MEDIUM`, `HIGH`, `UNKNOWN`) with confidence scores.
 
-### 2. Evidence-Based Missing Work Detection
-Detects omitted work and verification gaps based on repository signals:
-- `MISSING_TESTS_FOR_CHANGE`: Source files modified without any corresponding test file updates.
-- `MISSING_DATABASE_MIGRATION`: Models or schema definitions modified without migration scripts.
-- `MISSING_CLI_TEST`: CLI command parser or argument handling modified without CLI test updates.
-- `MISSING_LOCKFILE_UPDATE`: Dependency manifests modified without corresponding lockfile synchronization.
-- `MISSING_SECURITY_VALIDATION`: Security/auth boundaries modified without security-related test coverage.
-- `MISSING_ERROR_HANDLING_OR_TEST`: Error-handling modifications without failure-path test coverage.
-- `REMOVED_BEHAVIOR_WITHOUT_TEST_UPDATE`: Code deletions without corresponding test refactoring.
+### 1. Evidence Graph (Proof Graph)
+Connects all repository facts, changes, symbols, and test outcomes into a queryable, typed graph:
+- **Typed Nodes**: `TASK`, `FILE`, `SYMBOL`, `CHANGE`, `CHECK`, `EVIDENCE`, `RISK_FINDING`, `DRIFT_FINDING`, `MISSING_WORK`, `VERDICT`.
+- **Relational Edges**:
+  - `TARGETS` (`TASK -> FILE`)
+  - `CONTAINS` (`CHANGE -> FILE` or `FILE -> SYMBOL`)
+  - `MODIFIES` (`CHANGE -> SYMBOL`)
+  - `IMPACTS` (`SYMBOL -> SYMBOL` or `FILE -> FILE`)
+  - `VALIDATED_BY` (`CHANGE -> CHECK`)
+  - `PRODUCES` (`CHECK -> EVIDENCE`)
+  - `SUPPORTS` (`EVIDENCE -> FINDING`)
+  - `TRIGGERS` (`FILE/CHANGE -> RISK_FINDING`, `DRIFT_FINDING`, `MISSING_WORK`)
+  - `AFFECTS` (`FINDING -> VERDICT` or `EVIDENCE -> VERDICT`)
 
-### 3. Change Impact Analysis (V2 Foundation)
-- Identifies likely affected areas across the repository:
-  $$\text{Changed File} \longrightarrow \text{Changed Symbol} \longrightarrow \text{Dependent Callers / Imports} \longrightarrow \text{Related Tests} \longrightarrow \text{Config / Deps}$$
-- Maps dependent callers and related test suites for every modified module.
-- Calculates an overall **Impact Rating** (`LOW`, `MEDIUM`, `HIGH`).
+### 2. Verdict Traceability
+Enables developers and CI systems to answer:
+> *"Why did AgentProof reach this verdict, and what specific evidence supports it?"*
+Every check result, risk warning, drift finding, and missing work omission connects directly to the root `VERDICT` node with human-readable rationale and linked evidence records.
 
-### 4. Evidence-Backed Risk Findings
-Every finding provides three structured dimensions:
-- **What was detected**
-- **Why it matters**
-- **Supporting evidence**
+### 3. Machine-Readable Proof Passport (Schema v1.0.0)
+A concise, portable verification summary artifact generated deterministically from the Proof Graph and verification run:
+- Repository identity and pinned Git commit SHA.
+- Change statistics (files, symbols, lines added/deleted).
+- Change blast radius impact summary.
+- Scope drift detection status.
+- Missing work & omission analysis.
+- Execution check statuses, exit codes, and durations.
+- Unified findings list (risks, drift, missing work).
+- Evidence references with SHA-256 integrity hashes.
+- Tamper-evident passport digest.
 
-### 5. Structured 8-Section Reports
-Both terminal and JSON formats (Schema v1.2.0) clearly separate repository facts, deterministic analysis, and tool execution:
-1. `CHANGE` (Repository Facts)
-2. `IMPACT` (Change Impact Analysis)
-3. `DRIFT` (Task-to-Change Drift Analysis)
-4. `MISSING WORK` (Omission & Gap Detection)
-5. `CHECKS` (Validation Execution)
-6. `RISKS & FINDINGS` (AgentProof Analysis)
-7. `EVIDENCE` (Facts & Provenance)
-8. `FINAL VERDICT`
+### 4. Deterministic Integrity & Provenance
+- Canonical JSON serialization (sorted dictionary keys, compact delimiters).
+- Cryptographic SHA-256 digests over evidence records and the full passport to provide tamper-evident provenance without claiming asymmetric cryptographic signatures.
+
+### 5. Task-to-Change Drift Detection (V3 Foundation)
+- Compares intended task with actual repository changes.
+- Computes `DriftLevel` (`NONE`, `LOW`, `MEDIUM`, `HIGH`, `UNKNOWN`) with explainable rationale.
+
+### 6. Evidence-Based Missing Work Detection (V3 Foundation)
+- Detects omitted engineering work: missing tests, missing migrations, missing lockfile updates, and unvalidated CLI changes.
 
 ---
 
@@ -89,53 +87,65 @@ pip install -e ".[dev]"
 
 ## CLI Usage
 
-### Verify Working Tree
+### 1. Verify Working Tree (8-Section Report)
 Inspect changes in the current repository and run verification:
 ```bash
 agentproof verify
 ```
 
-### Verify with Task Intent (Drift Analysis)
-Supply task context via command-line argument:
+With task intent (to evaluate scope drift):
 ```bash
 agentproof verify --task "Fix authentication token expiration"
 ```
 
-Or supply task context via a text file:
+Structured JSON output (Schema v1.2.0):
 ```bash
-agentproof verify --task-file task_description.txt
+agentproof verify --json
 ```
 
-### Machine-Readable JSON Output (Schema v1.2.0)
-Output the complete verification report as structured JSON:
+### 2. Generate Proof Passport
+Generate and inspect the concise Proof Passport in your terminal:
 ```bash
-agentproof verify --task "Refactor CLI" --json
+agentproof passport
 ```
 
-### Inspect Only Staged Changes
-Verify changes that have been staged with `git add`:
+With task intent:
 ```bash
-agentproof verify --staged
+agentproof passport --task "Refactor CLI options"
 ```
 
-### Specify Target Directory
-Point to any repository directory:
+Output machine-readable Proof Passport JSON (Schema v1.0.0):
 ```bash
-agentproof verify -d /path/to/repo
+agentproof passport --json
 ```
 
-### CLI Options Reference
+### 3. Inspect Proof Graph
+Inspect node counts, relationships, and verdict traceability:
+```bash
+agentproof graph
+```
+
+Output the complete, structured Proof Graph as JSON:
+```bash
+agentproof graph --json
+```
+
+### 4. CLI Options Reference
 ```text
+subcommands:
+  verify                Inspect Git changes, analyze drift and missing work, and run verification checks
+  passport              Generate and inspect a machine-readable Proof Passport
+  graph                 Inspect the Proof Graph connecting tasks, changes, evidence, and verdict
+
 options:
   -h, --help            show this help message and exit
   -v, --version         show program's version number and exit
   -d, --target-dir TARGET_DIR
                         Target repository directory (default: .)
-  --task TASK           Task description or instruction string to check drift against
-  --task-file TASK_FILE
-                        Path to file containing task description to check drift against
+  -t, --task TASK       Task description or intent to evaluate scope drift against
+  --task-file TASK_FILE Path to file containing task description
   --staged              Inspect only staged changes instead of the entire working tree
-  --json                Output structured verification results as JSON
+  --json                Output structured results as JSON
   --no-color            Disable ANSI color output in terminal
   --timeout TIMEOUT     Execution timeout per check in seconds (default: 60)
   --strict              Treat INCONCLUSIVE verdicts as non-zero exit codes in CI
@@ -153,15 +163,17 @@ options:
 
 ## Known Limitations & Design Boundaries
 
-AgentProof V3 adheres strictly to deterministic analysis principles:
-1. **Deterministic Intent Extraction**: Task parsing is rule-based and keyword/token-driven. It avoids hallucinations and probabilistic guesses, but does not perform complex semantic or natural language reasoning.
-2. **Standard Library AST**: Symbol extraction and caller reference tracking currently target Python projects out of the box. Multi-language AST parsing (Tree-sitter, language servers) is planned for future releases.
-3. **No Fake Intelligence**: AgentProof will never manufacture evidence or claim an assertion is "proven" without verifiable artifacts (exit codes, AST nodes, git diffs).
-4. **Local-First Execution**: Validation checks run in local subprocesses within the repository root. Isolated containerization and sandbox environments are planned for future versions.
+AgentProof V4 adheres strictly to deterministic evidence principles:
+1. **Deterministic Proof Graph**: Every node and edge is derived directly from observable repository facts, AST parsing, or tool execution. No speculative relationships are fabricated.
+2. **Tamper-Evident Digest vs. Signatures**: Integrity digests are canonical SHA-256 hashes to detect accidental modifications. Cryptographic key-pair signing (PKI / notary) is reserved for future versions.
+3. **Local Graph Storage**: The Proof Graph is generated in-memory and serialized as JSON on-demand. Persistent graph databases are not required for local operations.
+4. **Standard Library AST**: Symbol extraction and caller reference tracking currently target Python projects out of the box. Multi-language AST parsing (Tree-sitter, LSP) is planned for future releases.
+5. **No Fake Intelligence**: In alignment with `AGENTS.md`, AgentProof will never manufacture evidence or label an inference as "proven" without verifiable artifacts.
 
 ---
 
 ## License
 
 Apache-2.0
+
 

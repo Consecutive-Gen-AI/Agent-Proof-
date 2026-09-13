@@ -19,10 +19,16 @@ from agentproof.core.verdict import evaluate_verdict
 from agentproof.detector.tools import ToolDetector
 from agentproof.drift.analyzer import DriftAnalyzer
 from agentproof.formatters.json_format import format_json_report
-from agentproof.formatters.terminal import format_terminal_report
+from agentproof.formatters.terminal import (
+    format_graph_terminal,
+    format_passport_terminal,
+    format_terminal_report,
+)
 from agentproof.git.repo import GitError, GitRepo, NotAGitRepositoryError
+from agentproof.graph.builder import ProofGraphBuilder
 from agentproof.impact.analyzer import ImpactAnalyzer
 from agentproof.missing.analyzer import MissingWorkAnalyzer
+from agentproof.passport.generator import PassportGenerator
 from agentproof.runner.executor import CheckExecutor
 from agentproof.task.context import TaskParser
 
@@ -47,6 +53,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect Git changes, analyze drift and missing work, and run verification checks.",
     )
     _add_verify_arguments(verify_parser)
+
+    # passport subcommand (V4)
+    passport_parser = subparsers.add_parser(
+        "passport",
+        help="Generate and inspect a machine-readable Proof Passport.",
+    )
+    _add_verify_arguments(passport_parser)
+
+    # graph subcommand (V4)
+    graph_parser = subparsers.add_parser(
+        "graph",
+        help="Inspect the Proof Graph connecting tasks, changes, evidence, and verdict.",
+    )
+    _add_verify_arguments(graph_parser)
 
     # Also add arguments to root parser so `agentproof verify` flags work at root too
     _add_verify_arguments(parser)
@@ -98,57 +118,16 @@ def _add_verify_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def run_verify(
+def _execute_pipeline(
     target_dir: str = ".",
     task_text: str = "",
     task_file: str = "",
     staged: bool = False,
-    json_output: bool = False,
-    no_color: bool = False,
     timeout: int = 60,
-    strict: bool = False,
-) -> int:
-    """
-    V3 Core verification pipeline:
-    1. Parse task context (if provided)
-    2. Inspect Git repository (staged vs unstaged, symbols, renames)
-    3. Analyze changes & detect risks
-    4. Analyze change impact on dependent files & tests
-    5. Analyze Task-to-Change Drift (V3)
-    6. Analyze Missing Work & Omissions (V3)
-    7. Detect available validation tools
-    8. Safely execute checks (with commit provenance & summaries)
-    9. Synthesize final verdict
-    10. Render 8-section report (terminal or JSON 1.2.0)
-    """
+) -> tuple[VerificationReport, GitRepo]:
+    """Execute the full V1-V3 analysis and check pipeline, returning the report and repo."""
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-    try:
-        git_repo = GitRepo(target_dir=target_dir)
-    except NotAGitRepositoryError as e:
-        if json_output:
-            err_doc = {
-                "error": "NOT_A_GIT_REPOSITORY",
-                "message": str(e),
-                "target_dir": str(Path(target_dir).resolve()),
-                "timestamp": now_iso,
-            }
-            print(json.dumps(err_doc, indent=2))
-        else:
-            print(f"Error: {e}", file=sys.stderr)
-        return 2
-    except GitError as e:
-        if json_output:
-            err_doc = {
-                "error": "GIT_ERROR",
-                "message": str(e),
-                "target_dir": str(Path(target_dir).resolve()),
-                "timestamp": now_iso,
-            }
-            print(json.dumps(err_doc, indent=2))
-        else:
-            print(f"Git Error: {e}", file=sys.stderr)
-        return 2
+    git_repo = GitRepo(target_dir=target_dir)
 
     # 1. Parse Task Context (V3)
     task_parser = TaskParser()
@@ -214,18 +193,142 @@ def run_verify(
         timestamp=now_iso,
     )
 
-    # 11. Render output
+    return report, git_repo
+
+
+def _handle_git_error(e: Exception, json_output: bool, target_dir: str, error_code: str) -> int:
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    if json_output:
+        err_doc = {
+            "error": error_code,
+            "message": str(e),
+            "target_dir": str(Path(target_dir).resolve()),
+            "timestamp": now_iso,
+        }
+        print(json.dumps(err_doc, indent=2))
+    else:
+        prefix = "Error:" if error_code == "NOT_A_GIT_REPOSITORY" else "Git Error:"
+        print(f"{prefix} {e}", file=sys.stderr)
+    return 2
+
+
+def run_verify(
+    target_dir: str = ".",
+    task_text: str = "",
+    task_file: str = "",
+    staged: bool = False,
+    json_output: bool = False,
+    no_color: bool = False,
+    timeout: int = 60,
+    strict: bool = False,
+) -> int:
+    """Run verification and display the 8-section report or JSON."""
+    try:
+        report, _ = _execute_pipeline(
+            target_dir=target_dir,
+            task_text=task_text,
+            task_file=task_file,
+            staged=staged,
+            timeout=timeout,
+        )
+    except NotAGitRepositoryError as e:
+        return _handle_git_error(e, json_output, target_dir, "NOT_A_GIT_REPOSITORY")
+    except GitError as e:
+        return _handle_git_error(e, json_output, target_dir, "GIT_ERROR")
+
+    # Render output
     if json_output:
         print(format_json_report(report))
     else:
         print(format_terminal_report(report, no_color=no_color))
 
-    # 12. Return exit status
-    if verdict in (Verdict.VERIFIED, Verdict.VERIFIED_WITH_WARNINGS):
+    # Return exit status
+    if report.verdict in (Verdict.VERIFIED, Verdict.VERIFIED_WITH_WARNINGS):
         return 0
-    elif verdict in (Verdict.FAILED, Verdict.ERROR):
+    elif report.verdict in (Verdict.FAILED, Verdict.ERROR):
         return 1
-    elif verdict == Verdict.INCONCLUSIVE:
+    elif report.verdict == Verdict.INCONCLUSIVE:
+        return 1 if strict else 0
+    return 1
+
+
+def run_passport(
+    target_dir: str = ".",
+    task_text: str = "",
+    task_file: str = "",
+    staged: bool = False,
+    json_output: bool = False,
+    no_color: bool = False,
+    timeout: int = 60,
+    strict: bool = False,
+) -> int:
+    """Run verification, build ProofGraph and ProofPassport, and output the passport."""
+    try:
+        report, _ = _execute_pipeline(
+            target_dir=target_dir,
+            task_text=task_text,
+            task_file=task_file,
+            staged=staged,
+            timeout=timeout,
+        )
+    except NotAGitRepositoryError as e:
+        return _handle_git_error(e, json_output, target_dir, "NOT_A_GIT_REPOSITORY")
+    except GitError as e:
+        return _handle_git_error(e, json_output, target_dir, "GIT_ERROR")
+
+    graph = ProofGraphBuilder(report).build()
+    passport = PassportGenerator(report, graph=graph).generate()
+
+    if json_output:
+        print(passport.to_json())
+    else:
+        print(format_passport_terminal(passport, no_color=no_color))
+
+    if report.verdict in (Verdict.VERIFIED, Verdict.VERIFIED_WITH_WARNINGS):
+        return 0
+    elif report.verdict in (Verdict.FAILED, Verdict.ERROR):
+        return 1
+    elif report.verdict == Verdict.INCONCLUSIVE:
+        return 1 if strict else 0
+    return 1
+
+
+def run_graph(
+    target_dir: str = ".",
+    task_text: str = "",
+    task_file: str = "",
+    staged: bool = False,
+    json_output: bool = False,
+    no_color: bool = False,
+    timeout: int = 60,
+    strict: bool = False,
+) -> int:
+    """Run verification, construct the ProofGraph, and output graph structure or summary."""
+    try:
+        report, _ = _execute_pipeline(
+            target_dir=target_dir,
+            task_text=task_text,
+            task_file=task_file,
+            staged=staged,
+            timeout=timeout,
+        )
+    except NotAGitRepositoryError as e:
+        return _handle_git_error(e, json_output, target_dir, "NOT_A_GIT_REPOSITORY")
+    except GitError as e:
+        return _handle_git_error(e, json_output, target_dir, "GIT_ERROR")
+
+    graph = ProofGraphBuilder(report).build()
+
+    if json_output:
+        print(graph.to_json())
+    else:
+        print(format_graph_terminal(graph, no_color=no_color))
+
+    if report.verdict in (Verdict.VERIFIED, Verdict.VERIFIED_WITH_WARNINGS):
+        return 0
+    elif report.verdict in (Verdict.FAILED, Verdict.ERROR):
+        return 1
+    elif report.verdict == Verdict.INCONCLUSIVE:
         return 1 if strict else 0
     return 1
 
@@ -237,7 +340,31 @@ def main(args: Optional[List[str]] = None) -> None:
 
     command = parsed_args.command or "verify"
 
-    if command == "verify":
+    if command == "passport":
+        exit_code = run_passport(
+            target_dir=parsed_args.target_dir,
+            task_text=parsed_args.task,
+            task_file=parsed_args.task_file,
+            staged=parsed_args.staged,
+            json_output=parsed_args.json,
+            no_color=parsed_args.no_color,
+            timeout=parsed_args.timeout,
+            strict=parsed_args.strict,
+        )
+        sys.exit(exit_code)
+    elif command == "graph":
+        exit_code = run_graph(
+            target_dir=parsed_args.target_dir,
+            task_text=parsed_args.task,
+            task_file=parsed_args.task_file,
+            staged=parsed_args.staged,
+            json_output=parsed_args.json,
+            no_color=parsed_args.no_color,
+            timeout=parsed_args.timeout,
+            strict=parsed_args.strict,
+        )
+        sys.exit(exit_code)
+    elif command == "verify":
         exit_code = run_verify(
             target_dir=parsed_args.target_dir,
             task_text=parsed_args.task,
@@ -256,3 +383,4 @@ def main(args: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
+
