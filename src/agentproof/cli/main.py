@@ -12,7 +12,6 @@ from typing import List, Optional
 from agentproof import __version__
 from agentproof.analyzer.change import ChangeAnalyzer
 from agentproof.core.models import (
-    ChangeSummary,
     Verdict,
     VerificationReport,
 )
@@ -21,6 +20,7 @@ from agentproof.detector.tools import ToolDetector
 from agentproof.formatters.json_format import format_json_report
 from agentproof.formatters.terminal import format_terminal_report
 from agentproof.git.repo import GitError, GitRepo, NotAGitRepositoryError
+from agentproof.impact.analyzer import ImpactAnalyzer
 from agentproof.runner.executor import CheckExecutor
 
 
@@ -94,13 +94,14 @@ def run_verify(
     strict: bool = False,
 ) -> int:
     """
-    Core verification pipeline:
-    1. Inspect Git repository
-    2. Analyze changes & detect risks
-    3. Detect available validation tools
-    4. Safely execute checks
-    5. Evaluate verdict
-    6. Output report
+    V2 Core verification pipeline:
+    1. Inspect Git repository (staged vs unstaged, symbols, renames)
+    2. Analyze changes & detect risks (with what/why/evidence)
+    3. Analyze change impact on dependent files & tests
+    4. Detect available validation tools
+    5. Safely execute checks (with commit provenance & summaries)
+    6. Evaluate verdict
+    7. Render report (terminal or JSON)
     """
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -140,24 +141,29 @@ def run_verify(
     analyzer = ChangeAnalyzer()
     change_summary, warnings = analyzer.analyze(change_summary)
 
-    # 3. Detect available validation checks
+    # 3. Change impact analysis (V2)
+    impact_analyzer = ImpactAnalyzer(git_repo.root_dir)
+    impact = impact_analyzer.analyze(change_summary)
+
+    # 4. Detect available validation checks
     detector = ToolDetector(git_repo.root_dir)
     check_defs = detector.detect_checks()
 
-    # 4. Safely execute checks
-    executor = CheckExecutor(cwd=git_repo.root_dir, timeout=timeout)
+    # 5. Safely execute checks with commit provenance
+    executor = CheckExecutor(cwd=git_repo.root_dir, timeout=timeout, git_commit=commit)
     check_results = executor.run_all(check_defs)
 
-    # 5. Evaluate final verdict
+    # 6. Evaluate final verdict
     verdict, reasoning = evaluate_verdict(checks=check_results, warnings=warnings)
 
-    # 6. Assemble complete report
+    # 7. Assemble complete report
     report = VerificationReport(
-        schema_version="1.0.0",
+        schema_version="1.1.0",
         target_dir=str(git_repo.root_dir),
         git_branch=branch,
         git_commit=commit,
         change_summary=change_summary,
+        impact=impact,
         checks=check_results,
         warnings=warnings,
         verdict=verdict,
@@ -165,13 +171,13 @@ def run_verify(
         timestamp=now_iso,
     )
 
-    # 7. Render output
+    # 8. Render output
     if json_output:
         print(format_json_report(report))
     else:
         print(format_terminal_report(report, no_color=no_color))
 
-    # 8. Return exit status
+    # 9. Return exit status
     if verdict in (Verdict.VERIFIED, Verdict.VERIFIED_WITH_WARNINGS):
         return 0
     elif verdict in (Verdict.FAILED, Verdict.ERROR):
@@ -186,7 +192,6 @@ def main(args: Optional[List[str]] = None) -> None:
     parser = build_parser()
     parsed_args = parser.parse_args(args)
 
-    # Default command is 'verify'
     command = parsed_args.command or "verify"
 
     if command == "verify":

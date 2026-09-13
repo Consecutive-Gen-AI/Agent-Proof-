@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import os
-import re
 from typing import List, Tuple
 
 from agentproof.core.models import (
     ChangeSummary,
     FileCategory,
-    FileChange,
+    FileStatus,
+    RiskFinding,
     RiskSeverity,
-    RiskWarning,
 )
 
 # Known dependency file patterns
@@ -57,7 +56,7 @@ SECURITY_KEYWORDS = {"auth", "token", "credential", "secret", "password", "crypt
 
 
 class ChangeAnalyzer:
-    """Analyzes a ChangeSummary to classify files and flag potential risks."""
+    """Analyzes a ChangeSummary to classify files and generate evidence-backed risk findings."""
 
     def categorize_file(self, rel_path: str) -> FileCategory:
         """Determine semantic category of a file based on path and name."""
@@ -104,19 +103,26 @@ class ChangeAnalyzer:
 
         return FileCategory.OTHER
 
-    def analyze(self, summary: ChangeSummary) -> Tuple[ChangeSummary, List[RiskWarning]]:
+    def analyze(self, summary: ChangeSummary) -> Tuple[ChangeSummary, List[RiskFinding]]:
         """
         Populate categories for each file in the summary, compute category totals,
-        and generate risk warnings.
+        and generate evidence-backed risk findings.
         """
         categories_count: dict[str, int] = {}
-        warnings: List[RiskWarning] = []
+        findings: List[RiskFinding] = []
 
         source_files: List[str] = []
         test_files: List[str] = []
         dep_files: List[str] = []
+        config_files: List[str] = []
         security_files: List[str] = []
         ci_files: List[str] = []
+        api_files: List[str] = []
+        renamed_files: List[Tuple[str, str]] = []
+        deleted_files: List[str] = []
+
+        test_adds = 0
+        test_dels = 0
 
         for f in summary.files:
             category = self.categorize_file(f.path)
@@ -124,68 +130,165 @@ class ChangeAnalyzer:
             cat_name = category.value
             categories_count[cat_name] = categories_count.get(cat_name, 0) + 1
 
-            if category == FileCategory.SOURCE:
-                source_files.append(f.path)
-            elif category == FileCategory.TEST:
-                test_files.append(f.path)
-            elif category == FileCategory.DEPENDENCY:
-                dep_files.append(f.path)
-            elif category == FileCategory.SECURITY_SENSITIVE:
-                security_files.append(f.path)
+            rel_p = f.path.replace("\\", "/")
 
-            if f.path.replace("\\", "/").startswith(".github/workflows/"):
-                ci_files.append(f.path)
+            if category == FileCategory.SOURCE:
+                source_files.append(rel_p)
+                # Check for API surface modifications (e.g. __init__.py, public exports)
+                if os.path.basename(rel_p) == "__init__.py" or "api" in rel_p.lower():
+                    api_files.append(rel_p)
+            elif category == FileCategory.TEST:
+                test_files.append(rel_p)
+                test_adds += f.additions
+                test_dels += f.deletions
+            elif category == FileCategory.DEPENDENCY:
+                dep_files.append(rel_p)
+            elif category == FileCategory.CONFIGURATION:
+                config_files.append(rel_p)
+            elif category == FileCategory.SECURITY_SENSITIVE:
+                security_files.append(rel_p)
+
+            if rel_p.startswith(".github/workflows/"):
+                ci_files.append(rel_p)
+
+            if f.status == FileStatus.RENAMED and f.old_path:
+                renamed_files.append((f.old_path, rel_p))
+            elif f.status == FileStatus.DELETED:
+                deleted_files.append(rel_p)
 
         summary.categories_count = categories_count
 
-        # Detection 1: Untested code changes (Missing Work)
+        # 1. Detection: Untested code changes (Missing Work)
         if source_files and not test_files:
-            warnings.append(
-                RiskWarning(
+            findings.append(
+                RiskFinding(
                     code="UNTESTED_SOURCE_CHANGE",
                     severity=RiskSeverity.WARNING,
                     message=f"{len(source_files)} source file(s) modified/added without accompanying test changes.",
                     related_files=source_files[:10],
+                    what_was_detected=f"{len(source_files)} source file(s) modified without corresponding test file modifications.",
+                    why_it_matters="Unverified code modifications carry a significantly higher defect rate and lack reproducible regression protection.",
+                    evidence=[f"{p} (+{f.additions}/-{f.deletions})" for p, f in [(f.path, f) for f in summary.files if f.category == FileCategory.SOURCE][:5]],
                 )
             )
 
-        # Detection 2: Dependency changes
+        # 2. Detection: Tests reduced or removed
+        deletedTests = [p for p in deleted_files if "test" in p.lower()]
+        if deletedTests or (test_dels > 15 and test_dels > test_adds * 2):
+            evidence_items = []
+            if deletedTests:
+                evidence_items.append(f"Deleted test files: {', '.join(deletedTests)}")
+            evidence_items.append(f"Test lines changed: +{test_adds} / -{test_dels}")
+
+            findings.append(
+                RiskFinding(
+                    code="TESTS_REDUCED",
+                    severity=RiskSeverity.WARNING,
+                    message=f"Test coverage was reduced (-{test_dels} test lines deleted vs +{test_adds} added).",
+                    related_files=test_files + deletedTests,
+                    what_was_detected="Test files were deleted or test lines were reduced substantially.",
+                    why_it_matters="Removing tests weakens verification safety nets and may conceal regressions or boundary-condition failures.",
+                    evidence=evidence_items,
+                )
+            )
+
+        # 3. Detection: Public API surface modified
+        if api_files:
+            findings.append(
+                RiskFinding(
+                    code="API_SURFACE_MODIFIED",
+                    severity=RiskSeverity.INFO,
+                    message=f"Public API surface or module entrypoint altered ({', '.join(api_files[:5])}).",
+                    related_files=api_files,
+                    what_was_detected=f"Modifications detected in public module interfaces or API files: {', '.join(api_files[:3])}.",
+                    why_it_matters="Changes to public interfaces can break downstream consumers and require semantic versioning considerations.",
+                    evidence=[f"Modified {p}" for p in api_files[:5]],
+                )
+            )
+
+        # 4. Detection: Renamed or deleted important files
+        important_deleted_or_renamed = [
+            p for p in deleted_files if p in DEPENDENCY_FILENAMES or p.endswith(".py") or p.endswith(".ts")
+        ]
+        if important_deleted_or_renamed or renamed_files:
+            evidence_items = []
+            if important_deleted_or_renamed:
+                evidence_items.append(f"Deleted: {', '.join(important_deleted_or_renamed[:5])}")
+            if renamed_files:
+                evidence_items.append(f"Renamed: {', '.join(f'{old} -> {new}' for old, new in renamed_files[:5])}")
+
+            findings.append(
+                RiskFinding(
+                    code="IMPORTANT_FILE_DELETED_OR_RENAMED",
+                    severity=RiskSeverity.WARNING,
+                    message=f"Core files were deleted or renamed ({len(important_deleted_or_renamed) + len(renamed_files)} file(s)).",
+                    related_files=important_deleted_or_renamed + [new for _, new in renamed_files],
+                    what_was_detected="Source files or dependency files were deleted or renamed.",
+                    why_it_matters="Renaming or deleting modules can cause broken imports, broken builds, or stale references in dependent components.",
+                    evidence=evidence_items,
+                )
+            )
+
+        # 5. Detection: Dependency changes
         if dep_files:
-            warnings.append(
-                RiskWarning(
+            findings.append(
+                RiskFinding(
                     code="DEPENDENCY_MODIFIED",
                     severity=RiskSeverity.INFO,
                     message=f"Dependency manifests/lockfiles modified ({', '.join(dep_files)}). Verify supply-chain safety.",
                     related_files=dep_files,
+                    what_was_detected=f"Modifications detected in dependency declarations: {', '.join(dep_files)}.",
+                    why_it_matters="Dependency modifications alter the software supply chain and can introduce transitive bugs or security advisories.",
+                    evidence=[f"Manifest: {p}" for p in dep_files],
                 )
             )
 
-        # Detection 3: CI/CD workflow changes
+        # 6. Detection: CI/CD workflow changes
         if ci_files:
-            warnings.append(
-                RiskWarning(
+            findings.append(
+                RiskFinding(
                     code="CI_WORKFLOW_MODIFIED",
                     severity=RiskSeverity.WARNING,
                     message=f"CI/CD automation files modified ({', '.join(ci_files)}). Ensure workflow permissions are safe.",
                     related_files=ci_files,
+                    what_was_detected=f"CI/CD pipeline configuration altered: {', '.join(ci_files)}.",
+                    why_it_matters="CI changes can alter testing gates, deploy keys, or automation permissions.",
+                    evidence=[f"Workflow file: {p}" for p in ci_files],
                 )
             )
 
-        # Detection 4: Security-sensitive changes
+        # 7. Detection: Security-sensitive changes
         if security_files:
-            warnings.append(
-                RiskWarning(
+            findings.append(
+                RiskFinding(
                     code="SECURITY_SENSITIVE_MODIFIED",
                     severity=RiskSeverity.HIGH,
                     message=f"Security-sensitive files modified ({', '.join(security_files)}). Requires strict manual review.",
                     related_files=security_files,
+                    what_was_detected=f"Changes detected in security/auth boundaries: {', '.join(security_files)}.",
+                    why_it_matters="Flaws in authentication, token validation, or cryptography can lead to privilege escalation or unauthorized data access.",
+                    evidence=[f"Security file: {p}" for p in security_files],
                 )
             )
 
-        # Detection 5: Excessively large diff (Drift/Blast radius)
+        # 8. Detection: Configuration files modified
+        if config_files and not ci_files and not dep_files:
+            findings.append(
+                RiskFinding(
+                    code="CONFIGURATION_MODIFIED",
+                    severity=RiskSeverity.INFO,
+                    message=f"Configuration files altered ({', '.join(config_files[:5])}).",
+                    related_files=config_files,
+                    what_was_detected=f"Project configuration files modified: {', '.join(config_files[:5])}.",
+                    why_it_matters="Configuration changes affect runtime parameters, environment flags, and build tooling behaviors.",
+                    evidence=[f"Config file: {p}" for p in config_files[:5]],
+                )
+            )
+
+        # 9. Detection: Excessively large diff (Drift/Blast radius)
         if summary.total_files > 25 or (summary.total_additions + summary.total_deletions) > 600:
-            warnings.append(
-                RiskWarning(
+            findings.append(
+                RiskFinding(
                     code="LARGE_DIFF",
                     severity=RiskSeverity.WARNING,
                     message=(
@@ -193,7 +296,10 @@ class ChangeAnalyzer:
                         f"+{summary.total_additions}/-{summary.total_deletions} lines. High blast radius."
                     ),
                     related_files=[f.path for f in summary.files[:10]],
+                    what_was_detected=f"Large diff with {summary.total_files} files and {summary.total_additions + summary.total_deletions} total line changes.",
+                    why_it_matters="High-volume diffs have wider blast radius, higher defect probability, and are harder to audit exhaustively.",
+                    evidence=[f"Files: {summary.total_files}", f"Additions: +{summary.total_additions}", f"Deletions: -{summary.total_deletions}"],
                 )
             )
 
-        return summary, warnings
+        return summary, findings

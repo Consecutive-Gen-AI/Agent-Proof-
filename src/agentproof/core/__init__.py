@@ -1,29 +1,41 @@
 """Core models and domain types for AgentProof."""
 
 from agentproof.core.models import (
+    ChangeImpact,
+    ChangeSummary,
     CheckCategory,
     CheckResult,
     CheckStatus,
     FileCategory,
     FileChange,
     FileStatus,
+    ImpactRelation,
+    ImpactedComponent,
+    RiskFinding,
     RiskSeverity,
     RiskWarning,
-    ChangeSummary,
+    SymbolChange,
+    SymbolType,
     Verdict,
     VerificationReport,
 )
 
 __all__ = [
+    "ChangeImpact",
+    "ChangeSummary",
     "CheckCategory",
     "CheckResult",
     "CheckStatus",
     "FileCategory",
     "FileChange",
     "FileStatus",
+    "ImpactRelation",
+    "ImpactedComponent",
+    "RiskFinding",
     "RiskSeverity",
     "RiskWarning",
-    "ChangeSummary",
+    "SymbolChange",
+    "SymbolType",
     "Verdict",
     "VerificationReport",
 ]
