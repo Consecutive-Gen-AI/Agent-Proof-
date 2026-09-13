@@ -1,10 +1,13 @@
-"""Verdict evaluation logic for synthesizing checks and risk warnings."""
+"""Verdict evaluation logic for synthesizing checks, risk warnings, drift, and missing work."""
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from agentproof.core.models import (
+    CheckCategory,
     CheckResult,
     CheckStatus,
-    CheckCategory,
+    DriftLevel,
+    DriftReport,
+    MissingWorkReport,
     RiskSeverity,
     RiskWarning,
     Verdict,
@@ -14,10 +17,12 @@ from agentproof.core.models import (
 def evaluate_verdict(
     checks: List[CheckResult],
     warnings: List[RiskWarning],
+    drift: Optional[DriftReport] = None,
+    missing_work: Optional[MissingWorkReport] = None,
 ) -> Tuple[Verdict, str]:
     """
-    Evaluate the final verification verdict based on independent check results
-    and detected risk warnings.
+    Evaluate the final verification verdict based on independent check results,
+    detected risk warnings, task drift, and missing work.
 
     Returns:
         Tuple of (Verdict, human-readable reasoning).
@@ -57,20 +62,34 @@ def evaluate_verdict(
             "No verification checks were executed or detected for this repository.",
         )
 
-    # 3. If checks passed, evaluate risk warnings
+    # 3. If checks passed, evaluate drift, missing work, and risk warnings
+    caution_signals: List[str] = []
+
+    # A. Check drift
+    if drift and drift.drift_level in (DriftLevel.HIGH, DriftLevel.MEDIUM):
+        caution_signals.append(f"{drift.drift_level.value} scope drift detected ({len(drift.unexpected_files)} unexpected file(s))")
+
+    # B. Check missing work
+    if missing_work and missing_work.findings:
+        high_missing = [f for f in missing_work.findings if f.severity == RiskSeverity.HIGH]
+        if high_missing:
+            caution_signals.append(f"Critical missing work: {high_missing[0].title}")
+        else:
+            caution_signals.append(f"{len(missing_work.findings)} missing work gap(s) detected")
+
+    # C. Check general risk warnings
     high_risks = [w for w in warnings if w.severity == RiskSeverity.HIGH]
     warning_risks = [w for w in warnings if w.severity == RiskSeverity.WARNING]
+    if high_risks:
+        caution_signals.append(f"{len(high_risks)} high-risk signal(s)")
+    elif warning_risks:
+        caution_signals.append(f"{len(warning_risks)} risk warning(s)")
 
-    if high_risks or warning_risks:
-        reasons = []
-        if high_risks:
-            reasons.append(f"{len(high_risks)} high-risk signal(s) detected")
-        if warning_risks:
-            reasons.append(f"{len(warning_risks)} warning(s) detected")
+    if caution_signals:
         passed_names = ", ".join(c.name for c in passed_checks)
         return (
             Verdict.VERIFIED_WITH_WARNINGS,
-            f"Checks passed ({passed_names}), but caution is required: {'; '.join(reasons)}.",
+            f"Checks passed ({passed_names}), but caution is required: {'; '.join(caution_signals)}.",
         )
 
     # 4. Clean pass with independent evidence
@@ -79,9 +98,9 @@ def evaluate_verdict(
     if test_passed:
         return (
             Verdict.VERIFIED,
-            f"All independent checks passed ({passed_names}) with no risk warnings detected.",
+            f"All independent checks passed ({passed_names}) with no drift, omissions, or risk warnings.",
         )
     return (
         Verdict.VERIFIED,
-        f"Validation checks passed ({passed_names}) with no risk warnings detected.",
+        f"Validation checks passed ({passed_names}) with no drift, omissions, or risk warnings.",
     )

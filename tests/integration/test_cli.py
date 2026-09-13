@@ -38,3 +38,12 @@ def test_cli_non_git_repo_json(tmp_path: Path):
     assert proc.returncode == 2
     data = json.loads(proc.stdout)
     assert data["error"] == "NOT_A_GIT_REPOSITORY"
+
+
+def test_cli_verify_help_shows_task_flags():
+    cmd = [sys.executable, "-m", "agentproof.cli.main", "verify", "--help"]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.returncode == 0
+    assert "--task" in proc.stdout
+    assert "--task-file" in proc.stdout
+

@@ -110,7 +110,7 @@ class FileChange:
     deletions: int = 0
     category: FileCategory = FileCategory.OTHER
     patch_snippet: Optional[str] = None
-    old_path: Optional[str] = None  # For renamed files
+    old_path: Optional[str] = None
     is_staged: bool = False
     is_unstaged: bool = False
     staged_additions: int = 0
@@ -221,7 +221,7 @@ class ImpactedComponent:
     """A file or component identified as potentially affected by changes."""
     file_path: str
     relation: ImpactRelation
-    impacted_by: str  # Which changed file or symbol caused this impact
+    impacted_by: str
     description: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -249,7 +249,7 @@ class ChangeImpact:
     impacted_source_files: List[ImpactedComponent] = field(default_factory=list)
     impacted_test_files: List[ImpactedComponent] = field(default_factory=list)
     impacted_configs: List[str] = field(default_factory=list)
-    total_impact_score: str = "LOW"  # LOW, MEDIUM, HIGH
+    total_impact_score: str = "LOW"
     untested_impacts: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -273,6 +273,210 @@ class ChangeImpact:
             untested_impacts=data.get("untested_impacts", []),
         )
 
+
+# =============================================================================
+# V3: Task Context Models
+# =============================================================================
+
+@dataclass
+class TaskContext:
+    """Structured representation of intended task context."""
+    raw_text: str
+    normalized_keywords: List[str] = field(default_factory=list)
+    referenced_paths: List[str] = field(default_factory=list)
+    referenced_symbols: List[str] = field(default_factory=list)
+    expected_domains: List[str] = field(default_factory=list)
+    inferred_scope: str = "UNKNOWN"  # NARROW, BROAD, UNKNOWN
+    confidence: str = "MEDIUM"  # LOW, MEDIUM, HIGH
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "raw_text": self.raw_text,
+            "normalized_keywords": self.normalized_keywords,
+            "referenced_paths": self.referenced_paths,
+            "referenced_symbols": self.referenced_symbols,
+            "expected_domains": self.expected_domains,
+            "inferred_scope": self.inferred_scope,
+            "confidence": self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> TaskContext:
+        return cls(
+            raw_text=data.get("raw_text", ""),
+            normalized_keywords=data.get("normalized_keywords", []),
+            referenced_paths=data.get("referenced_paths", []),
+            referenced_symbols=data.get("referenced_symbols", []),
+            expected_domains=data.get("expected_domains", []),
+            inferred_scope=data.get("inferred_scope", "UNKNOWN"),
+            confidence=data.get("confidence", "MEDIUM"),
+        )
+
+
+# =============================================================================
+# V3: Agent Drift Models
+# =============================================================================
+
+class DriftLevel(str, Enum):
+    """Level of scope drift detected between task and actual change."""
+    NONE = "NONE"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass
+class DriftFinding:
+    """Detailed drift finding for an unexpected file modification."""
+    file_path: str
+    drift_level: DriftLevel
+    what_was_detected: str
+    why_it_was_considered_drift: str
+    supporting_evidence: List[str] = field(default_factory=list)
+    severity: RiskSeverity = RiskSeverity.WARNING
+    confidence: str = "HIGH"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "file_path": self.file_path,
+            "drift_level": self.drift_level.value,
+            "what_was_detected": self.what_was_detected,
+            "why_it_was_considered_drift": self.why_it_was_considered_drift,
+            "supporting_evidence": self.supporting_evidence,
+            "severity": self.severity.value,
+            "confidence": self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DriftFinding:
+        return cls(
+            file_path=data["file_path"],
+            drift_level=DriftLevel(data.get("drift_level", DriftLevel.LOW.value)),
+            what_was_detected=data.get("what_was_detected", ""),
+            why_it_was_considered_drift=data.get("why_it_was_considered_drift", ""),
+            supporting_evidence=data.get("supporting_evidence", []),
+            severity=RiskSeverity(data.get("severity", RiskSeverity.WARNING.value)),
+            confidence=data.get("confidence", "HIGH"),
+        )
+
+
+@dataclass
+class DriftReport:
+    """Aggregated report of scope drift analysis."""
+    task_context: Optional[TaskContext] = None
+    drift_level: DriftLevel = DriftLevel.NONE
+    confidence: str = "HIGH"
+    aligned_files: List[str] = field(default_factory=list)
+    unexpected_files: List[str] = field(default_factory=list)
+    findings: List[DriftFinding] = field(default_factory=list)
+    summary: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_context": self.task_context.to_dict() if self.task_context else None,
+            "drift_level": self.drift_level.value,
+            "confidence": self.confidence,
+            "aligned_files": self.aligned_files,
+            "unexpected_files": self.unexpected_files,
+            "findings": [f.to_dict() for f in self.findings],
+            "summary": self.summary,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DriftReport:
+        task_data = data.get("task_context")
+        return cls(
+            task_context=TaskContext.from_dict(task_data) if task_data else None,
+            drift_level=DriftLevel(data.get("drift_level", DriftLevel.NONE.value)),
+            confidence=data.get("confidence", "HIGH"),
+            aligned_files=data.get("aligned_files", []),
+            unexpected_files=data.get("unexpected_files", []),
+            findings=[DriftFinding.from_dict(f) for f in data.get("findings", [])],
+            summary=data.get("summary", ""),
+        )
+
+
+# =============================================================================
+# V3: Missing Work Models
+# =============================================================================
+
+class MissingWorkCategory(str, Enum):
+    """Category of missing engineering work."""
+    TESTS = "TESTS"
+    DOCUMENTATION = "DOCUMENTATION"
+    MIGRATION = "MIGRATION"
+    ERROR_HANDLING = "ERROR_HANDLING"
+    SECURITY = "SECURITY"
+    CONFIGURATION = "CONFIGURATION"
+    DEPENDENCY = "DEPENDENCY"
+    CLI = "CLI"
+
+
+@dataclass
+class MissingWorkFinding:
+    """Specific evidence-backed finding for necessary work omitted from change."""
+    code: str
+    category: MissingWorkCategory
+    title: str
+    what_was_detected: str
+    why_it_matters: str
+    evidence: List[str] = field(default_factory=list)
+    affected_files: List[str] = field(default_factory=list)
+    severity: RiskSeverity = RiskSeverity.WARNING
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "code": self.code,
+            "category": self.category.value,
+            "title": self.title,
+            "what_was_detected": self.what_was_detected,
+            "why_it_matters": self.why_it_matters,
+            "evidence": self.evidence,
+            "affected_files": self.affected_files,
+            "severity": self.severity.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> MissingWorkFinding:
+        return cls(
+            code=data["code"],
+            category=MissingWorkCategory(data.get("category", MissingWorkCategory.TESTS.value)),
+            title=data.get("title", ""),
+            what_was_detected=data.get("what_was_detected", ""),
+            why_it_matters=data.get("why_it_matters", ""),
+            evidence=data.get("evidence", []),
+            affected_files=data.get("affected_files", []),
+            severity=RiskSeverity(data.get("severity", RiskSeverity.WARNING.value)),
+        )
+
+
+@dataclass
+class MissingWorkReport:
+    """Aggregated report of missing work analysis."""
+    findings_count: int = 0
+    findings: List[MissingWorkFinding] = field(default_factory=list)
+    summary: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "findings_count": self.findings_count,
+            "findings": [f.to_dict() for f in self.findings],
+            "summary": self.summary,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> MissingWorkReport:
+        return cls(
+            findings_count=data.get("findings_count", 0),
+            findings=[MissingWorkFinding.from_dict(f) for f in data.get("findings", [])],
+            summary=data.get("summary", ""),
+        )
+
+
+# =============================================================================
+# Check, Warning, and Verification Report Models
+# =============================================================================
 
 @dataclass
 class CheckResult:
@@ -356,19 +560,21 @@ class RiskWarning:
         )
 
 
-# Alias RiskFinding to RiskWarning for rich V2 finding capability
 RiskFinding = RiskWarning
 
 
 @dataclass
 class VerificationReport:
-    """Complete, structured verification report for a software change."""
-    schema_version: str = "1.1.0"
+    """Complete, structured verification report for a software change (Schema v1.2.0)."""
+    schema_version: str = "1.2.0"
     target_dir: str = ""
     git_branch: Optional[str] = None
     git_commit: Optional[str] = None
+    task_context: Optional[TaskContext] = None
     change_summary: ChangeSummary = field(default_factory=ChangeSummary)
     impact: Optional[ChangeImpact] = None
+    drift: Optional[DriftReport] = None
+    missing_work: Optional[MissingWorkReport] = None
     checks: List[CheckResult] = field(default_factory=list)
     warnings: List[RiskWarning] = field(default_factory=list)
     verdict: Verdict = Verdict.INCONCLUSIVE
@@ -382,10 +588,13 @@ class VerificationReport:
             "git_branch": self.git_branch,
             "git_commit": self.git_commit,
             "timestamp": self.timestamp,
+            "task_context": self.task_context.to_dict() if self.task_context else None,
             "verdict": self.verdict.value,
             "reasoning": self.reasoning,
             "change_summary": self.change_summary.to_dict(),
             "impact": self.impact.to_dict() if self.impact else None,
+            "drift": self.drift.to_dict() if self.drift else None,
+            "missing_work": self.missing_work.to_dict() if self.missing_work else None,
             "checks": [c.to_dict() for c in self.checks],
             "warnings": [w.to_dict() for w in self.warnings],
             "findings": [w.to_dict() for w in self.warnings],
@@ -394,16 +603,22 @@ class VerificationReport:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> VerificationReport:
         impact_data = data.get("impact")
+        drift_data = data.get("drift")
+        missing_data = data.get("missing_work")
+        task_data = data.get("task_context")
         return cls(
-            schema_version=data.get("schema_version", "1.1.0"),
+            schema_version=data.get("schema_version", "1.2.0"),
             target_dir=data.get("target_dir", ""),
             git_branch=data.get("git_branch"),
             git_commit=data.get("git_commit"),
+            task_context=TaskContext.from_dict(task_data) if task_data else None,
             timestamp=data.get("timestamp", ""),
             verdict=Verdict(data.get("verdict", Verdict.INCONCLUSIVE.value)),
             reasoning=data.get("reasoning", ""),
             change_summary=ChangeSummary.from_dict(data.get("change_summary", {})),
             impact=ChangeImpact.from_dict(impact_data) if impact_data else None,
+            drift=DriftReport.from_dict(drift_data) if drift_data else None,
+            missing_work=MissingWorkReport.from_dict(missing_data) if missing_data else None,
             checks=[CheckResult.from_dict(c) for c in data.get("checks", [])],
             warnings=[RiskWarning.from_dict(w) for w in data.get("warnings", data.get("findings", []))],
         )

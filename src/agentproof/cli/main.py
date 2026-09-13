@@ -17,11 +17,14 @@ from agentproof.core.models import (
 )
 from agentproof.core.verdict import evaluate_verdict
 from agentproof.detector.tools import ToolDetector
+from agentproof.drift.analyzer import DriftAnalyzer
 from agentproof.formatters.json_format import format_json_report
 from agentproof.formatters.terminal import format_terminal_report
 from agentproof.git.repo import GitError, GitRepo, NotAGitRepositoryError
 from agentproof.impact.analyzer import ImpactAnalyzer
+from agentproof.missing.analyzer import MissingWorkAnalyzer
 from agentproof.runner.executor import CheckExecutor
+from agentproof.task.context import TaskParser
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,11 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     # verify subcommand
     verify_parser = subparsers.add_parser(
         "verify",
-        help="Inspect Git changes and run independent verification checks.",
+        help="Inspect Git changes, analyze drift and missing work, and run verification checks.",
     )
     _add_verify_arguments(verify_parser)
 
-    # Also add arguments to the root parser so `agentproof --json` works as a shortcut for `agentproof verify --json`
+    # Also add arguments to root parser so `agentproof verify` flags work at root too
     _add_verify_arguments(parser)
 
     return parser
@@ -56,6 +59,16 @@ def _add_verify_arguments(parser: argparse.ArgumentParser) -> None:
         "-d", "--target-dir",
         default=".",
         help="Target repository directory (default: current working directory).",
+    )
+    parser.add_argument(
+        "-t", "--task",
+        default="",
+        help="Task description or intent to evaluate scope drift against.",
+    )
+    parser.add_argument(
+        "--task-file",
+        default="",
+        help="Path to file containing task description.",
     )
     parser.add_argument(
         "--staged",
@@ -87,6 +100,8 @@ def _add_verify_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run_verify(
     target_dir: str = ".",
+    task_text: str = "",
+    task_file: str = "",
     staged: bool = False,
     json_output: bool = False,
     no_color: bool = False,
@@ -94,14 +109,17 @@ def run_verify(
     strict: bool = False,
 ) -> int:
     """
-    V2 Core verification pipeline:
-    1. Inspect Git repository (staged vs unstaged, symbols, renames)
-    2. Analyze changes & detect risks (with what/why/evidence)
-    3. Analyze change impact on dependent files & tests
-    4. Detect available validation tools
-    5. Safely execute checks (with commit provenance & summaries)
-    6. Evaluate verdict
-    7. Render report (terminal or JSON)
+    V3 Core verification pipeline:
+    1. Parse task context (if provided)
+    2. Inspect Git repository (staged vs unstaged, symbols, renames)
+    3. Analyze changes & detect risks
+    4. Analyze change impact on dependent files & tests
+    5. Analyze Task-to-Change Drift (V3)
+    6. Analyze Missing Work & Omissions (V3)
+    7. Detect available validation tools
+    8. Safely execute checks (with commit provenance & summaries)
+    9. Synthesize final verdict
+    10. Render 8-section report (terminal or JSON 1.2.0)
     """
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -132,38 +150,63 @@ def run_verify(
             print(f"Git Error: {e}", file=sys.stderr)
         return 2
 
-    # 1. Inspect Git working tree
+    # 1. Parse Task Context (V3)
+    task_parser = TaskParser()
+    if task_file:
+        task_context = task_parser.parse_file(task_file)
+    elif task_text:
+        task_context = task_parser.parse(task_text)
+    else:
+        task_context = None
+
+    # 2. Inspect Git working tree
     branch = git_repo.get_current_branch()
     commit = git_repo.get_head_commit()
     change_summary = git_repo.inspect_changes(staged_only=staged)
 
-    # 2. Static change & risk analysis
+    # 3. Static change & risk analysis
     analyzer = ChangeAnalyzer()
     change_summary, warnings = analyzer.analyze(change_summary)
 
-    # 3. Change impact analysis (V2)
+    # 4. Change impact analysis
     impact_analyzer = ImpactAnalyzer(git_repo.root_dir)
     impact = impact_analyzer.analyze(change_summary)
 
-    # 4. Detect available validation checks
+    # 5. Task Drift Analysis (V3)
+    drift_analyzer = DriftAnalyzer()
+    drift = drift_analyzer.analyze(summary=change_summary, task=task_context, impact=impact)
+
+    # 6. Missing Work Analysis (V3)
+    missing_analyzer = MissingWorkAnalyzer()
+    missing_work = missing_analyzer.analyze(summary=change_summary, task=task_context, impact=impact)
+
+    # 7. Detect available validation checks
     detector = ToolDetector(git_repo.root_dir)
     check_defs = detector.detect_checks()
 
-    # 5. Safely execute checks with commit provenance
+    # 8. Safely execute checks with commit provenance
     executor = CheckExecutor(cwd=git_repo.root_dir, timeout=timeout, git_commit=commit)
     check_results = executor.run_all(check_defs)
 
-    # 6. Evaluate final verdict
-    verdict, reasoning = evaluate_verdict(checks=check_results, warnings=warnings)
+    # 9. Evaluate final verdict
+    verdict, reasoning = evaluate_verdict(
+        checks=check_results,
+        warnings=warnings,
+        drift=drift,
+        missing_work=missing_work,
+    )
 
-    # 7. Assemble complete report
+    # 10. Assemble complete report (Schema 1.2.0)
     report = VerificationReport(
-        schema_version="1.1.0",
+        schema_version="1.2.0",
         target_dir=str(git_repo.root_dir),
         git_branch=branch,
         git_commit=commit,
+        task_context=task_context,
         change_summary=change_summary,
         impact=impact,
+        drift=drift,
+        missing_work=missing_work,
         checks=check_results,
         warnings=warnings,
         verdict=verdict,
@@ -171,13 +214,13 @@ def run_verify(
         timestamp=now_iso,
     )
 
-    # 8. Render output
+    # 11. Render output
     if json_output:
         print(format_json_report(report))
     else:
         print(format_terminal_report(report, no_color=no_color))
 
-    # 9. Return exit status
+    # 12. Return exit status
     if verdict in (Verdict.VERIFIED, Verdict.VERIFIED_WITH_WARNINGS):
         return 0
     elif verdict in (Verdict.FAILED, Verdict.ERROR):
@@ -197,6 +240,8 @@ def main(args: Optional[List[str]] = None) -> None:
     if command == "verify":
         exit_code = run_verify(
             target_dir=parsed_args.target_dir,
+            task_text=parsed_args.task,
+            task_file=parsed_args.task_file,
             staged=parsed_args.staged,
             json_output=parsed_args.json,
             no_color=parsed_args.no_color,
