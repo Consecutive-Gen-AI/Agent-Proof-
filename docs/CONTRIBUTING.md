@@ -30,8 +30,8 @@ Before proposing any change or writing code, internalize our core tenets:
 
 ### Local Installation
 ```bash
-git clone https://github.com/Consecutive-Gen-AI/agentproof.git
-cd agentproof
+git clone https://github.com/Consecutive-Gen-AI/Agent-Proof-.git
+cd Agent-Proof-
 pip install -e .[dev]
 ```
 

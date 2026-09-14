@@ -52,16 +52,16 @@ Anyone can install and use AgentProof on their existing projects in seconds.
 #### Option A: Install directly via `pip` from GitHub
 ```bash
 # Core installation (Zero external dependencies, standard library only)
-pip install git+https://github.com/Consecutive-Gen-AI/agentproof.git
+pip install git+https://github.com/Consecutive-Gen-AI/Agent-Proof-.git
 
 # With multi-language Tree-sitter CST parsing support (Python, JS, TS, Go, Rust, Java)
-pip install "agentproof[treesitter] @ git+https://github.com/Consecutive-Gen-AI/agentproof.git"
+pip install "agentproof[treesitter] @ git+https://github.com/Consecutive-Gen-AI/Agent-Proof-.git"
 ```
 
 #### Option B: Clone and install locally for development
 ```bash
-git clone https://github.com/Consecutive-Gen-AI/agentproof.git
-cd agentproof
+git clone https://github.com/Consecutive-Gen-AI/Agent-Proof-.git
+cd Agent-Proof-
 pip install -e ".[treesitter]"
 ```
 
@@ -169,7 +169,7 @@ jobs:
 
       - name: Install AgentProof
         run: |
-          pip install "agentproof[treesitter] @ git+https://github.com/Consecutive-Gen-AI/agentproof.git"
+          pip install "agentproof[treesitter] @ git+https://github.com/Consecutive-Gen-AI/Agent-Proof-.git"
 
       - name: Run Independent Proof Verification
         run: |
