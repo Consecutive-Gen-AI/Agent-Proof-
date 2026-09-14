@@ -52,11 +52,11 @@ treesitter = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/agentproof/agentproof"
-Documentation = "https://github.com/agentproof/agentproof#readme"
-Repository = "https://github.com/agentproof/agentproof.git"
-Issues = "https://github.com/agentproof/agentproof/issues"
-Changelog = "https://github.com/agentproof/agentproof/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/Consecutive-Gen-AI/agentproof"
+Documentation = "https://github.com/Consecutive-Gen-AI/agentproof#readme"
+Repository = "https://github.com/Consecutive-Gen-AI/agentproof.git"
+Issues = "https://github.com/Consecutive-Gen-AI/agentproof/issues"
+Changelog = "https://github.com/Consecutive-Gen-AI/agentproof/blob/main/docs/CHANGELOG.md"
 
 [project.scripts]
 agentproof = "agentproof.cli.main:main"

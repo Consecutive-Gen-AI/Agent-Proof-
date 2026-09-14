@@ -30,7 +30,7 @@ Before proposing any change or writing code, internalize our core tenets:
 
 ### Local Installation
 ```bash
-git clone https://github.com/agentproof/agentproof.git
+git clone https://github.com/Consecutive-Gen-AI/agentproof.git
 cd agentproof
 pip install -e .[dev]
 ```
