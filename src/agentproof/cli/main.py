@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from agentproof import __version__
+from agentproof.adversarial.generator import AttackGenerator
+from agentproof.adversarial.runner import AdversarialRunner
 from agentproof.analyzer.change import ChangeAnalyzer
 from agentproof.core.models import (
     Verdict,
@@ -28,6 +30,7 @@ from agentproof.git.repo import GitError, GitRepo, NotAGitRepositoryError
 from agentproof.graph.builder import ProofGraphBuilder
 from agentproof.impact.analyzer import ImpactAnalyzer
 from agentproof.missing.analyzer import MissingWorkAnalyzer
+from agentproof.integration import AgentContextIngestion, AgentFeedback
 from agentproof.passport.generator import PassportGenerator
 from agentproof.runner.executor import CheckExecutor
 from agentproof.task.context import TaskParser
@@ -53,6 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect Git changes, analyze drift and missing work, and run verification checks.",
     )
     _add_verify_arguments(verify_parser)
+
+    # inspect subcommand
+    inspect_parser = subparsers.add_parser(
+        "inspect",
+        help="Inspect Git changes, impact, and missing work without executing test checks.",
+    )
+    _add_verify_arguments(inspect_parser)
 
     # passport subcommand (V4)
     passport_parser = subparsers.add_parser(
@@ -106,6 +116,11 @@ def _add_verify_arguments(parser: argparse.ArgumentParser) -> None:
         help="Disable ANSI color output in terminal.",
     )
     parser.add_argument(
+        "--adversarial",
+        action="store_true",
+        help="Run deterministic adversarial verification checks against changed behavior.",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=60,
@@ -116,22 +131,43 @@ def _add_verify_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Treat INCONCLUSIVE verdicts as non-zero exit codes in CI.",
     )
+    parser.add_argument(
+        "--agent",
+        action="store_true",
+        help="Format output as concise, actionable feedback optimized for AI coding agents.",
+    )
+    parser.add_argument(
+        "--agent-input",
+        default="",
+        help="Path to JSON file (or '-' for stdin) containing structured agent context.",
+    )
 
 
 def _execute_pipeline(
     target_dir: str = ".",
     task_text: str = "",
     task_file: str = "",
+    agent_input: str = "",
     staged: bool = False,
+    adversarial: bool = False,
     timeout: int = 60,
+    skip_checks: bool = False,
 ) -> tuple[VerificationReport, GitRepo]:
-    """Execute the full V1-V3 analysis and check pipeline, returning the report and repo."""
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    """Execute the full V1-V6 analysis, check, and adversarial pipeline, returning the report and repo."""
+    now_iso = datetime.timezone.utc and datetime.datetime.now(datetime.timezone.utc).isoformat()
     git_repo = GitRepo(target_dir=target_dir)
 
-    # 1. Parse Task Context (V3)
+    # 1. Ingest Agent / Task Context (V3 + V6)
     task_parser = TaskParser()
-    if task_file:
+    agent_ctx = None
+    if agent_input:
+        agent_ctx = AgentContextIngestion.from_file_or_stdin(agent_input)
+    else:
+        agent_ctx = AgentContextIngestion.from_env()
+
+    if agent_ctx and (agent_ctx.task_intent or agent_ctx.intended_files):
+        task_context = agent_ctx.to_task_context()
+    elif task_file:
         task_context = task_parser.parse_file(task_file)
     elif task_text:
         task_context = task_parser.parse(task_text)
@@ -160,24 +196,42 @@ def _execute_pipeline(
     missing_work = missing_analyzer.analyze(summary=change_summary, task=task_context, impact=impact)
 
     # 7. Detect available validation checks
-    detector = ToolDetector(git_repo.root_dir)
-    check_defs = detector.detect_checks()
+    check_results = []
+    if not skip_checks:
+        detector = ToolDetector(git_repo.root_dir)
+        check_defs = detector.detect_checks()
 
-    # 8. Safely execute checks with commit provenance
-    executor = CheckExecutor(cwd=git_repo.root_dir, timeout=timeout, git_commit=commit)
-    check_results = executor.run_all(check_defs)
+        # 8. Safely execute checks with commit provenance
+        executor = CheckExecutor(cwd=git_repo.root_dir, timeout=timeout, git_commit=commit)
+        check_results = executor.run_all(check_defs)
+
+    # 8b. Adversarial verification (V5)
+    adversarial_report = None
+    if adversarial and not skip_checks:
+        generator = AttackGenerator(repo_root=git_repo.root_dir)
+        attack_cases = generator.generate_attacks(
+            change_summary=change_summary,
+            task_context=task_context,
+        )
+        runner = AdversarialRunner(repo_root=git_repo.root_dir, timeout=min(timeout, 10))
+        adversarial_report = runner.run_all(attack_cases)
 
     # 9. Evaluate final verdict
-    verdict, reasoning = evaluate_verdict(
-        checks=check_results,
-        warnings=warnings,
-        drift=drift,
-        missing_work=missing_work,
-    )
+    if skip_checks:
+        verdict = Verdict.INCONCLUSIVE
+        reasoning = "Inspection complete. Verification checks were skipped."
+    else:
+        verdict, reasoning = evaluate_verdict(
+            checks=check_results,
+            warnings=warnings,
+            drift=drift,
+            missing_work=missing_work,
+            adversarial=adversarial_report,
+        )
 
-    # 10. Assemble complete report (Schema 1.2.0)
+    # 10. Assemble complete report (Schema 1.2.0 / 1.3.0)
     report = VerificationReport(
-        schema_version="1.2.0",
+        schema_version="1.3.0" if adversarial_report is not None else "1.2.0",
         target_dir=str(git_repo.root_dir),
         git_branch=branch,
         git_commit=commit,
@@ -186,6 +240,7 @@ def _execute_pipeline(
         impact=impact,
         drift=drift,
         missing_work=missing_work,
+        adversarial=adversarial_report,
         checks=check_results,
         warnings=warnings,
         verdict=verdict,
@@ -216,25 +271,41 @@ def run_verify(
     target_dir: str = ".",
     task_text: str = "",
     task_file: str = "",
+    agent_input: str = "",
     staged: bool = False,
+    adversarial: bool = False,
     json_output: bool = False,
     no_color: bool = False,
+    agent_mode: bool = False,
     timeout: int = 60,
     strict: bool = False,
+    skip_checks: bool = False,
 ) -> int:
-    """Run verification and display the 8-section report or JSON."""
+    """Run verification and display the structured report or JSON."""
     try:
         report, _ = _execute_pipeline(
             target_dir=target_dir,
             task_text=task_text,
             task_file=task_file,
+            agent_input=agent_input,
             staged=staged,
+            adversarial=adversarial,
             timeout=timeout,
+            skip_checks=skip_checks,
         )
     except NotAGitRepositoryError as e:
         return _handle_git_error(e, json_output, target_dir, "NOT_A_GIT_REPOSITORY")
     except GitError as e:
         return _handle_git_error(e, json_output, target_dir, "GIT_ERROR")
+
+    # Render output for AI agents
+    if agent_mode:
+        feedback = AgentFeedback.from_report(report)
+        if json_output:
+            print(json.dumps(feedback.to_dict(), indent=2))
+        else:
+            print(feedback.to_markdown())
+        return feedback.exit_code
 
     # Render output
     if json_output:
@@ -245,7 +316,7 @@ def run_verify(
     # Return exit status
     if report.verdict in (Verdict.VERIFIED, Verdict.VERIFIED_WITH_WARNINGS):
         return 0
-    elif report.verdict in (Verdict.FAILED, Verdict.ERROR):
+    elif report.verdict in (Verdict.FAILED, Verdict.ERROR, Verdict.BLOCKED):
         return 1
     elif report.verdict == Verdict.INCONCLUSIVE:
         return 1 if strict else 0
@@ -256,7 +327,9 @@ def run_passport(
     target_dir: str = ".",
     task_text: str = "",
     task_file: str = "",
+    agent_input: str = "",
     staged: bool = False,
+    adversarial: bool = False,
     json_output: bool = False,
     no_color: bool = False,
     timeout: int = 60,
@@ -268,7 +341,9 @@ def run_passport(
             target_dir=target_dir,
             task_text=task_text,
             task_file=task_file,
+            agent_input=agent_input,
             staged=staged,
+            adversarial=adversarial,
             timeout=timeout,
         )
     except NotAGitRepositoryError as e:
@@ -286,7 +361,7 @@ def run_passport(
 
     if report.verdict in (Verdict.VERIFIED, Verdict.VERIFIED_WITH_WARNINGS):
         return 0
-    elif report.verdict in (Verdict.FAILED, Verdict.ERROR):
+    elif report.verdict in (Verdict.FAILED, Verdict.ERROR, Verdict.BLOCKED):
         return 1
     elif report.verdict == Verdict.INCONCLUSIVE:
         return 1 if strict else 0
@@ -297,7 +372,9 @@ def run_graph(
     target_dir: str = ".",
     task_text: str = "",
     task_file: str = "",
+    agent_input: str = "",
     staged: bool = False,
+    adversarial: bool = False,
     json_output: bool = False,
     no_color: bool = False,
     timeout: int = 60,
@@ -309,7 +386,9 @@ def run_graph(
             target_dir=target_dir,
             task_text=task_text,
             task_file=task_file,
+            agent_input=agent_input,
             staged=staged,
+            adversarial=adversarial,
             timeout=timeout,
         )
     except NotAGitRepositoryError as e:
@@ -326,7 +405,7 @@ def run_graph(
 
     if report.verdict in (Verdict.VERIFIED, Verdict.VERIFIED_WITH_WARNINGS):
         return 0
-    elif report.verdict in (Verdict.FAILED, Verdict.ERROR):
+    elif report.verdict in (Verdict.FAILED, Verdict.ERROR, Verdict.BLOCKED):
         return 1
     elif report.verdict == Verdict.INCONCLUSIVE:
         return 1 if strict else 0
@@ -335,17 +414,33 @@ def run_graph(
 
 def main(args: Optional[List[str]] = None) -> None:
     """Main entrypoint for the CLI."""
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     parser = build_parser()
     parsed_args = parser.parse_args(args)
 
     command = parsed_args.command or "verify"
+    adversarial = getattr(parsed_args, "adversarial", False)
+    agent_mode = getattr(parsed_args, "agent", False)
+    agent_input = getattr(parsed_args, "agent_input", "")
 
     if command == "passport":
         exit_code = run_passport(
             target_dir=parsed_args.target_dir,
             task_text=parsed_args.task,
             task_file=parsed_args.task_file,
+            agent_input=agent_input,
             staged=parsed_args.staged,
+            adversarial=adversarial,
             json_output=parsed_args.json,
             no_color=parsed_args.no_color,
             timeout=parsed_args.timeout,
@@ -357,23 +452,29 @@ def main(args: Optional[List[str]] = None) -> None:
             target_dir=parsed_args.target_dir,
             task_text=parsed_args.task,
             task_file=parsed_args.task_file,
+            agent_input=agent_input,
             staged=parsed_args.staged,
+            adversarial=adversarial,
             json_output=parsed_args.json,
             no_color=parsed_args.no_color,
             timeout=parsed_args.timeout,
             strict=parsed_args.strict,
         )
         sys.exit(exit_code)
-    elif command == "verify":
+    elif command in ("verify", "inspect"):
         exit_code = run_verify(
             target_dir=parsed_args.target_dir,
             task_text=parsed_args.task,
             task_file=parsed_args.task_file,
+            agent_input=agent_input,
             staged=parsed_args.staged,
+            adversarial=adversarial,
             json_output=parsed_args.json,
             no_color=parsed_args.no_color,
+            agent_mode=agent_mode,
             timeout=parsed_args.timeout,
             strict=parsed_args.strict,
+            skip_checks=(command == "inspect"),
         )
         sys.exit(exit_code)
     else:

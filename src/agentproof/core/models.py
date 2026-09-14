@@ -57,6 +57,7 @@ class Verdict(str, Enum):
     """Overall verification verdict."""
     VERIFIED = "VERIFIED"
     VERIFIED_WITH_WARNINGS = "VERIFIED_WITH_WARNINGS"
+    BLOCKED = "BLOCKED"
     FAILED = "FAILED"
     ERROR = "ERROR"
     INCONCLUSIVE = "INCONCLUSIVE"
@@ -118,6 +119,8 @@ class FileChange:
     unstaged_additions: int = 0
     unstaged_deletions: int = 0
     changed_symbols: List[SymbolChange] = field(default_factory=list)
+    language: Optional[str] = None
+    analysis_level: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -135,6 +138,8 @@ class FileChange:
             "unstaged_additions": self.unstaged_additions,
             "unstaged_deletions": self.unstaged_deletions,
             "changed_symbols": [s.to_dict() for s in self.changed_symbols],
+            "language": self.language,
+            "analysis_level": self.analysis_level,
         }
 
     @classmethod
@@ -154,6 +159,8 @@ class FileChange:
             unstaged_additions=data.get("unstaged_additions", 0),
             unstaged_deletions=data.get("unstaged_deletions", 0),
             changed_symbols=[SymbolChange.from_dict(s) for s in data.get("changed_symbols", [])],
+            language=data.get("language"),
+            analysis_level=data.get("analysis_level"),
         )
 
 
@@ -475,6 +482,282 @@ class MissingWorkReport:
 
 
 # =============================================================================
+# V5: Adversarial Verification Models
+# =============================================================================
+
+class AttackCategory(str, Enum):
+    """Classification of adversarial test case."""
+    EMPTY_INPUT = "EMPTY_INPUT"
+    NULL_OR_NONE_INPUT = "NULL_OR_NONE_INPUT"
+    BOUNDARY_VALUE = "BOUNDARY_VALUE"
+    MINIMUM_VALUE = "MINIMUM_VALUE"
+    MAXIMUM_VALUE = "MAXIMUM_VALUE"
+    INVALID_FORMAT = "INVALID_FORMAT"
+    MALFORMED_INPUT = "MALFORMED_INPUT"
+    DUPLICATE_INPUT = "DUPLICATE_INPUT"
+    MISSING_REQUIRED_VALUE = "MISSING_REQUIRED_VALUE"
+    UNEXPECTED_TYPE = "UNEXPECTED_TYPE"
+    ERROR_PATH = "ERROR_PATH"
+    PERMISSION_OR_AUTH_EDGE_CASE = "PERMISSION_OR_AUTH_EDGE_CASE"
+
+
+class AttackResultStatus(str, Enum):
+    """Observation outcome of an adversarial test execution."""
+    PASS = "PASS"
+    FAIL = "FAIL"
+    TIMEOUT = "TIMEOUT"
+    ERROR = "ERROR"
+    UNAVAILABLE = "UNAVAILABLE"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+@dataclass
+class AttackCase:
+    """A typed adversarial test case targeting changed behavior."""
+    id: str
+    category: AttackCategory
+    target_file: str = ""
+    target_symbol: str = ""
+    rationale: str = ""
+    test_input: Any = None
+    expected_behavior: str = ""
+    execution_code: str = ""
+    status: AttackResultStatus = AttackResultStatus.NOT_APPLICABLE
+    observed_behavior: str = ""
+    duration_ms: int = 0
+    stdout: str = ""
+    stderr: str = ""
+    evidence_id: Optional[str] = None
+    integrity_hash: Optional[str] = None
+    exit_code: Optional[int] = None
+    timeout_seconds: int = 5
+    timestamp: str = ""
+
+    def __init__(
+        self,
+        id: str,
+        category: AttackCategory,
+        target_file: str = "",
+        target_symbol: str = "",
+        rationale: str = "",
+        test_input: Any = None,
+        expected_behavior: str = "",
+        execution_code: str = "",
+        status: AttackResultStatus = AttackResultStatus.NOT_APPLICABLE,
+        observed_behavior: str = "",
+        duration_ms: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+        evidence_id: Optional[str] = None,
+        integrity_hash: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        timeout_seconds: int = 5,
+        execution_snippet: Optional[str] = None,
+        result: Optional[AttackResultStatus] = None,
+        timestamp: str = "",
+        **kwargs: Any,
+    ):
+        self.id = id
+        self.category = category if isinstance(category, AttackCategory) else AttackCategory(category)
+        self.target_file = target_file
+        self.target_symbol = target_symbol
+        self.rationale = rationale
+        self.test_input = test_input
+        self.expected_behavior = expected_behavior
+        self.execution_code = execution_snippet if execution_snippet is not None else execution_code
+        self.status = result if result is not None else status
+        self.observed_behavior = observed_behavior
+        self.duration_ms = duration_ms
+        self.stdout = stdout
+        self.stderr = stderr
+        self.evidence_id = evidence_id
+        self.integrity_hash = integrity_hash
+        self.exit_code = exit_code
+        self.timeout_seconds = timeout_seconds
+        self.timestamp = timestamp
+
+    @property
+    def result(self) -> AttackResultStatus:
+        return self.status
+
+    @result.setter
+    def result(self, val: AttackResultStatus) -> None:
+        self.status = val
+
+    @property
+    def execution_snippet(self) -> str:
+        return self.execution_code
+
+    @execution_snippet.setter
+    def execution_snippet(self, val: str) -> None:
+        self.execution_code = val
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "category": self.category.value,
+            "target_file": self.target_file,
+            "target_symbol": self.target_symbol,
+            "rationale": self.rationale,
+            "test_input": self.test_input,
+            "expected_behavior": self.expected_behavior,
+            "execution_code": self.execution_code,
+            "execution_snippet": self.execution_code,
+            "status": self.status.value,
+            "result": self.status.value,
+            "observed_behavior": self.observed_behavior,
+            "duration_ms": self.duration_ms,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "evidence_id": self.evidence_id,
+            "integrity_hash": self.integrity_hash,
+            "exit_code": self.exit_code,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AttackCase:
+        raw_status = data.get("result") or data.get("status") or AttackResultStatus.NOT_APPLICABLE.value
+        return cls(
+            id=data["id"],
+            category=AttackCategory(data["category"]),
+            target_file=data.get("target_file", ""),
+            target_symbol=data.get("target_symbol", ""),
+            rationale=data.get("rationale", ""),
+            test_input=data.get("test_input"),
+            expected_behavior=data.get("expected_behavior", ""),
+            execution_code=data.get("execution_code") or data.get("execution_snippet", ""),
+            status=AttackResultStatus(raw_status),
+            observed_behavior=data.get("observed_behavior", ""),
+            duration_ms=data.get("duration_ms", 0),
+            stdout=data.get("stdout", ""),
+            stderr=data.get("stderr", ""),
+            evidence_id=data.get("evidence_id"),
+            integrity_hash=data.get("integrity_hash"),
+            exit_code=data.get("exit_code"),
+            timeout_seconds=data.get("timeout_seconds", 5),
+        )
+
+
+@dataclass
+class AdversarialFinding:
+    """An evidence-based finding created when an adversarial attack exposes a defect."""
+    finding_id: str
+    category: AttackCategory
+    severity: RiskSeverity
+    target_file: str = ""
+    target_symbol: str = ""
+    description: str = ""
+    expected_behavior: str = ""
+    observed_behavior: str = ""
+    attack_case_id: str = ""
+    evidence: List[str] = field(default_factory=list)
+    target: str = ""
+    attack_case: Optional[AttackCase] = None
+
+    def __init__(
+        self,
+        finding_id: str = "",
+        category: AttackCategory = AttackCategory.ERROR_PATH,
+        severity: RiskSeverity = RiskSeverity.WARNING,
+        target_file: str = "",
+        target_symbol: str = "",
+        description: str = "",
+        expected_behavior: str = "",
+        observed_behavior: str = "",
+        attack_case_id: str = "",
+        evidence: Optional[List[str]] = None,
+        target: str = "",
+        attack_case: Optional[AttackCase] = None,
+        **kwargs: Any,
+    ):
+        self.finding_id = finding_id or f"finding:adversarial:{attack_case_id}"
+        self.category = category if isinstance(category, AttackCategory) else AttackCategory(category)
+        self.severity = severity if isinstance(severity, RiskSeverity) else RiskSeverity(severity)
+        self.target_file = target_file
+        self.target_symbol = target_symbol
+        self.target = target or target_symbol or target_file
+        self.description = description
+        self.expected_behavior = expected_behavior
+        self.observed_behavior = observed_behavior
+        self.attack_case_id = attack_case_id or (attack_case.id if attack_case else "")
+        self.evidence = evidence or []
+        self.attack_case = attack_case
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "finding_id": self.finding_id,
+            "category": self.category.value,
+            "severity": self.severity.value,
+            "target_file": self.target_file,
+            "target_symbol": self.target_symbol,
+            "target": self.target or self.target_symbol or self.target_file,
+            "description": self.description,
+            "expected_behavior": self.expected_behavior,
+            "observed_behavior": self.observed_behavior,
+            "attack_case_id": self.attack_case_id,
+            "evidence": self.evidence,
+            "attack_case": self.attack_case.to_dict() if self.attack_case else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AdversarialFinding:
+        case_data = data.get("attack_case")
+        return cls(
+            finding_id=data.get("finding_id", ""),
+            category=AttackCategory(data["category"]),
+            severity=RiskSeverity(data.get("severity", RiskSeverity.WARNING.value)),
+            target_file=data.get("target_file", ""),
+            target_symbol=data.get("target_symbol", ""),
+            target=data.get("target", ""),
+            description=data.get("description", ""),
+            expected_behavior=data.get("expected_behavior", ""),
+            observed_behavior=data.get("observed_behavior", ""),
+            attack_case_id=data.get("attack_case_id", ""),
+            evidence=data.get("evidence", []),
+            attack_case=AttackCase.from_dict(case_data) if case_data else None,
+        )
+
+
+@dataclass
+class AdversarialReport:
+    """Aggregated report of adversarial test generation and execution."""
+    cases_generated: int = 0
+    cases_passed: int = 0
+    cases_failed: int = 0
+    cases_timed_out: int = 0
+    cases_not_applicable: int = 0
+    cases: List[AttackCase] = field(default_factory=list)
+    findings: List[AdversarialFinding] = field(default_factory=list)
+    summary: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "cases_generated": self.cases_generated,
+            "cases_passed": self.cases_passed,
+            "cases_failed": self.cases_failed,
+            "cases_timed_out": self.cases_timed_out,
+            "cases_not_applicable": self.cases_not_applicable,
+            "cases": [c.to_dict() for c in self.cases],
+            "findings": [f.to_dict() for f in self.findings],
+            "summary": self.summary,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AdversarialReport:
+        return cls(
+            cases_generated=data.get("cases_generated", 0),
+            cases_passed=data.get("cases_passed", 0),
+            cases_failed=data.get("cases_failed", 0),
+            cases_timed_out=data.get("cases_timed_out", 0),
+            cases_not_applicable=data.get("cases_not_applicable", 0),
+            cases=[AttackCase.from_dict(c) for c in data.get("cases", [])],
+            findings=[AdversarialFinding.from_dict(f) for f in data.get("findings", [])],
+            summary=data.get("summary", ""),
+        )
+
+
+# =============================================================================
 # Check, Warning, and Verification Report Models
 # =============================================================================
 
@@ -565,7 +848,7 @@ RiskFinding = RiskWarning
 
 @dataclass
 class VerificationReport:
-    """Complete, structured verification report for a software change (Schema v1.2.0)."""
+    """Complete, structured verification report for a software change (Schema v1.2.0 / v1.3.0)."""
     schema_version: str = "1.2.0"
     target_dir: str = ""
     git_branch: Optional[str] = None
@@ -575,6 +858,7 @@ class VerificationReport:
     impact: Optional[ChangeImpact] = None
     drift: Optional[DriftReport] = None
     missing_work: Optional[MissingWorkReport] = None
+    adversarial: Optional[AdversarialReport] = None
     checks: List[CheckResult] = field(default_factory=list)
     warnings: List[RiskWarning] = field(default_factory=list)
     verdict: Verdict = Verdict.INCONCLUSIVE
@@ -595,6 +879,7 @@ class VerificationReport:
             "impact": self.impact.to_dict() if self.impact else None,
             "drift": self.drift.to_dict() if self.drift else None,
             "missing_work": self.missing_work.to_dict() if self.missing_work else None,
+            "adversarial": self.adversarial.to_dict() if self.adversarial else None,
             "checks": [c.to_dict() for c in self.checks],
             "warnings": [w.to_dict() for w in self.warnings],
             "findings": [w.to_dict() for w in self.warnings],
@@ -606,6 +891,7 @@ class VerificationReport:
         drift_data = data.get("drift")
         missing_data = data.get("missing_work")
         task_data = data.get("task_context")
+        adv_data = data.get("adversarial")
         return cls(
             schema_version=data.get("schema_version", "1.2.0"),
             target_dir=data.get("target_dir", ""),
@@ -619,6 +905,8 @@ class VerificationReport:
             impact=ChangeImpact.from_dict(impact_data) if impact_data else None,
             drift=DriftReport.from_dict(drift_data) if drift_data else None,
             missing_work=MissingWorkReport.from_dict(missing_data) if missing_data else None,
+            adversarial=AdversarialReport.from_dict(adv_data) if adv_data else None,
             checks=[CheckResult.from_dict(c) for c in data.get("checks", [])],
             warnings=[RiskWarning.from_dict(w) for w in data.get("warnings", data.get("findings", []))],
         )
+

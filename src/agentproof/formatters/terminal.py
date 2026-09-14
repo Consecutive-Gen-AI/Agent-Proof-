@@ -226,6 +226,40 @@ def format_terminal_report(report: VerificationReport, no_color: bool = False) -
     lines.append("")
 
     # =========================================================================
+    # SECTION: ADVERSARIAL VERIFICATION
+    # =========================================================================
+    if report.adversarial:
+        lines.append(color("--- ADVERSARIAL VERIFICATION ----------------------------------", BOLD))
+        adv = report.adversarial
+        lines.append("  Cases:")
+        lines.append(f"    {adv.cases_generated} generated")
+        lines.append("  Results:")
+        lines.append(f"    {color(str(adv.cases_passed) + ' PASS', GREEN)}")
+        fail_color = RED + BOLD if adv.cases_failed > 0 else WHITE
+        lines.append(f"    {color(str(adv.cases_failed) + ' FAIL', fail_color)}")
+        if adv.cases_timed_out > 0:
+            lines.append(f"    {color(str(adv.cases_timed_out) + ' TIMEOUT', RED + BOLD)}")
+        if adv.cases_not_applicable > 0:
+            lines.append(f"    {color(str(adv.cases_not_applicable) + ' NOT_APPLICABLE', DIM)}")
+        lines.append("  Findings:")
+        high_f = sum(1 for f in adv.findings if f.severity == RiskSeverity.HIGH)
+        med_f = sum(1 for f in adv.findings if f.severity == RiskSeverity.WARNING)
+        low_f = sum(1 for f in adv.findings if f.severity == RiskSeverity.INFO)
+        lines.append(f"    {color(str(high_f) + ' HIGH', RED + BOLD if high_f > 0 else WHITE)}")
+        lines.append(f"    {str(med_f)} MEDIUM")
+        lines.append(f"    {str(low_f)} LOW")
+        if adv.findings:
+            lines.append("")
+            lines.append(f"  {color('Adversarial Failures (' + str(len(adv.findings)) + '):', RED + BOLD)}")
+            for f in adv.findings[:4]:
+                lines.append(f"    ! {color(f.category.value + ' on ' + f.target, RED + BOLD)}")
+                lines.append(f"      {color('Expected:', DIM)} {f.expected_behavior}")
+                lines.append(f"      {color('Observed:', RED)} {f.observed_behavior}")
+            if len(adv.findings) > 4:
+                lines.append(f"      {color(f'... and {len(adv.findings) - 4} more adversarial findings', DIM)}")
+        lines.append("")
+
+    # =========================================================================
     # SECTION 6: RISKS & FINDINGS (AgentProof Analysis)
     # =========================================================================
     lines.append(color("--- 6. RISKS & FINDINGS (AgentProof Analysis) -----------------", BOLD))
@@ -267,6 +301,7 @@ def format_terminal_report(report: VerificationReport, no_color: bool = False) -
     v_color = {
         Verdict.VERIFIED: GREEN + BOLD,
         Verdict.VERIFIED_WITH_WARNINGS: YELLOW + BOLD,
+        Verdict.BLOCKED: RED + BOLD,
         Verdict.FAILED: RED + BOLD,
         Verdict.ERROR: RED + BOLD,
         Verdict.INCONCLUSIVE: YELLOW + BOLD,

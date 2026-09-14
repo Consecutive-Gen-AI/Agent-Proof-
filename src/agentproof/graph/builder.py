@@ -350,6 +350,112 @@ class ProofGraphBuilder:
                     properties={"severity": mw.severity.value, "reason": mw.what_was_detected},
                 ))
 
+        # 10. Adversarial Verification
+        if self.report.adversarial:
+            for case in self.report.adversarial.cases:
+                attack_id = f"attack:{case.id}"
+                attack_props = case.to_dict()
+                self.graph.add_node(GraphNode(
+                    id=attack_id,
+                    node_type=NodeType.ATTACK_CASE,
+                    label=f"Attack: {case.category.value} ({case.target_symbol or case.target_file})",
+                    properties=attack_props,
+                    integrity_hash=compute_integrity_hash(attack_props),
+                ))
+                self.graph.add_edge(GraphEdge(
+                    source_id=change_id,
+                    target_id=attack_id,
+                    relation=RelationType.VALIDATED_BY,
+                    label=f"Validated by adversarial case {case.id}",
+                ))
+
+                # Challenges target symbol or file
+                target_node_id = None
+                if case.target_symbol:
+                    candidate_sym = f"symbol:{case.target_file}#{case.target_symbol}"
+                    if self.graph.get_node(candidate_sym):
+                        target_node_id = candidate_sym
+                if not target_node_id and case.target_file:
+                    candidate_file = f"file:{case.target_file}"
+                    if self.graph.get_node(candidate_file):
+                        target_node_id = candidate_file
+
+                if target_node_id:
+                    self.graph.add_edge(GraphEdge(
+                        source_id=attack_id,
+                        target_id=target_node_id,
+                        relation=RelationType.CHALLENGES,
+                        label=f"Challenges {case.category.value} robustness",
+                    ))
+
+                # Attack Evidence Node
+                res_val = case.result.value if case.result else "NOT_RUN"
+                ev_id = f"evidence:attack:{case.id}"
+                ev_props = {
+                    "attack_id": case.id,
+                    "category": case.category.value,
+                    "result": res_val,
+                    "duration_ms": case.duration_ms,
+                    "observed_behavior": case.observed_behavior,
+                    "timestamp": case.timestamp,
+                }
+                self.graph.add_node(GraphNode(
+                    id=ev_id,
+                    node_type=NodeType.EVIDENCE,
+                    label=f"Attack Evidence: {case.id} [{res_val}]",
+                    properties=ev_props,
+                    integrity_hash=case.integrity_hash or compute_integrity_hash(ev_props),
+                ))
+                self.graph.add_edge(GraphEdge(
+                    source_id=attack_id,
+                    target_id=ev_id,
+                    relation=RelationType.PRODUCES,
+                    label=f"Produced attack evidence ({res_val})",
+                ))
+
+                # If passed, support verdict
+                if res_val == "PASS":
+                    self.graph.add_edge(GraphEdge(
+                        source_id=ev_id,
+                        target_id=verdict_id,
+                        relation=RelationType.SUPPORTS,
+                        label=f"Adversarial check passed: {case.category.value}",
+                        properties={
+                            "status": "PASS",
+                            "reason": f"Attack case {case.id} satisfied expected behavior",
+                        },
+                    ))
+
+            # Adversarial Findings
+            for finding in self.report.adversarial.findings:
+                af_id = f"finding:adversarial:{finding.attack_case_id}"
+                af_props = finding.to_dict()
+                self.graph.add_node(GraphNode(
+                    id=af_id,
+                    node_type=NodeType.ADVERSARIAL_FINDING,
+                    label=f"Adversarial Finding: {finding.category.value} [{finding.severity.value}]",
+                    properties=af_props,
+                    integrity_hash=compute_integrity_hash(af_props),
+                ))
+
+                # Link from attack evidence to finding
+                ev_id = f"evidence:attack:{finding.attack_case_id}"
+                if self.graph.get_node(ev_id):
+                    self.graph.add_edge(GraphEdge(
+                        source_id=ev_id,
+                        target_id=af_id,
+                        relation=RelationType.TRIGGERS,
+                        label="Triggers adversarial finding",
+                    ))
+
+                # Finding affects verdict
+                self.graph.add_edge(GraphEdge(
+                    source_id=af_id,
+                    target_id=verdict_id,
+                    relation=RelationType.AFFECTS,
+                    label=f"Adversarial failure: {finding.category.value}",
+                    properties={"severity": finding.severity.value, "reason": finding.description},
+                ))
 
         # Store graph overall integrity
         canonical_nodes_and_edges = [n.to_dict() for n in self.graph.nodes.values()] + [e.to_dict() for e in self.graph.edges]

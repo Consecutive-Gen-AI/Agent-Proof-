@@ -1,7 +1,8 @@
 """Verdict evaluation logic for synthesizing checks, risk warnings, drift, and missing work."""
 
-from typing import List, Optional, Tuple
 from agentproof.core.models import (
+    AdversarialReport,
+    AttackResultStatus,
     CheckCategory,
     CheckResult,
     CheckStatus,
@@ -19,15 +20,16 @@ def evaluate_verdict(
     warnings: List[RiskWarning],
     drift: Optional[DriftReport] = None,
     missing_work: Optional[MissingWorkReport] = None,
+    adversarial: Optional[AdversarialReport] = None,
 ) -> Tuple[Verdict, str]:
     """
     Evaluate the final verification verdict based on independent check results,
-    detected risk warnings, task drift, and missing work.
+    detected risk warnings, task drift, missing work, and adversarial verification.
 
     Returns:
         Tuple of (Verdict, human-readable reasoning).
     """
-    # 1. Check for hard failures
+    # 1. Check for hard failures in standard checks
     failed_checks = [c for c in checks if c.status == CheckStatus.FAIL]
     timed_out_checks = [c for c in checks if c.status == CheckStatus.TIMEOUT]
     errored_checks = [c for c in checks if c.status == CheckStatus.ERROR]
@@ -45,6 +47,18 @@ def evaluate_verdict(
     if errored_checks:
         names = ", ".join(c.name for c in errored_checks)
         return Verdict.ERROR, f"Check execution error in: {names}."
+
+    # 1b. Check for adversarial verification failures (blocks verification)
+    if adversarial and (adversarial.cases_failed > 0 or adversarial.cases_timed_out > 0 or adversarial.findings):
+        reasons = []
+        for finding in adversarial.findings[:3]:
+            reasons.append(f"{finding.category.value} on {finding.target} ({finding.description})")
+        joined = "; ".join(reasons)
+        more = f" and {len(adversarial.findings) - 3} more" if len(adversarial.findings) > 3 else ""
+        return (
+            Verdict.BLOCKED,
+            f"Verification BLOCKED by {len(adversarial.findings)} adversarial failure(s): {joined}{more}.",
+        )
 
     # 2. Check for passed checks vs absence of checks
     passed_checks = [c for c in checks if c.status == CheckStatus.PASS]
@@ -95,12 +109,13 @@ def evaluate_verdict(
     # 4. Clean pass with independent evidence
     test_passed = any(c.category == CheckCategory.TEST for c in passed_checks)
     passed_names = ", ".join(c.name for c in passed_checks)
+    adv_note = f" and adversarial checks passed ({adversarial.cases_passed} passed)" if (adversarial and adversarial.cases_passed > 0) else ""
     if test_passed:
         return (
             Verdict.VERIFIED,
-            f"All independent checks passed ({passed_names}) with no drift, omissions, or risk warnings.",
+            f"All independent checks passed ({passed_names}){adv_note} with no drift, omissions, or risk warnings.",
         )
     return (
         Verdict.VERIFIED,
-        f"Validation checks passed ({passed_names}) with no drift, omissions, or risk warnings.",
+        f"Validation checks passed ({passed_names}){adv_note} with no drift, omissions, or risk warnings.",
     )

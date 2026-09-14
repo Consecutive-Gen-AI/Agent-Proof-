@@ -1,6 +1,11 @@
 """Core models and domain types for AgentProof."""
 
 from agentproof.core.models import (
+    AdversarialFinding,
+    AdversarialReport,
+    AttackCase,
+    AttackCategory,
+    AttackResultStatus,
     ChangeImpact,
     ChangeSummary,
     CheckCategory,
@@ -36,6 +41,11 @@ from agentproof.graph.models import (
 from agentproof.passport.models import ProofPassport
 
 __all__ = [
+    "AdversarialFinding",
+    "AdversarialReport",
+    "AttackCase",
+    "AttackCategory",
+    "AttackResultStatus",
     "ChangeImpact",
     "ChangeSummary",
     "CheckCategory",

@@ -76,6 +76,8 @@ class ChangeAnalyzer:
             or ".spec." in filename
             or ".test." in filename
             or filename.endswith("_test.go")
+            or filename.endswith("test.java")
+            or filename.endswith("tests.java")
         )
         if is_test_dir or is_test_file:
             return FileCategory.TEST

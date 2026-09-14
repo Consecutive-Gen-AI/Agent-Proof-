@@ -6,11 +6,14 @@ import sys
 from pathlib import Path
 
 
+from agentproof import __version__
+
+
 def test_cli_version():
     cmd = [sys.executable, "-m", "agentproof.cli.main", "--version"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     assert proc.returncode == 0
-    assert "agentproof 0.1.0" in proc.stdout.strip()
+    assert f"agentproof {__version__}" in proc.stdout.strip()
 
 
 def test_cli_help():
@@ -46,4 +49,12 @@ def test_cli_verify_help_shows_task_flags():
     assert proc.returncode == 0
     assert "--task" in proc.stdout
     assert "--task-file" in proc.stdout
+    assert "--adversarial" in proc.stdout
+
+
+def test_cli_inspect_help_and_subcommand():
+    cmd = [sys.executable, "-m", "agentproof.cli.main", "inspect", "--help"]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.returncode == 0
+    assert "inspect" in proc.stdout.lower()
 

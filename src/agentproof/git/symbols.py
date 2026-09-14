@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Set, Tuple
 
 from agentproof.core.models import SymbolChange, SymbolType
+from agentproof.structure import StructureEngine, SupportedLanguage, SymbolKind
 
 # Regex to match hunk headers in git diff: @@ -x,y +a,b @@ [context]
 HUNK_HEADER_REGEX = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@\s*(.*)$")
@@ -20,6 +21,9 @@ GENERIC_SYMBOL_REGEX = re.compile(
 
 class SymbolExtractor:
     """Extracts changed functions, classes, and methods from changed files and patches."""
+
+    def __init__(self, engine: Optional[StructureEngine] = None) -> None:
+        self.engine = engine or StructureEngine()
 
     def extract_from_diff_text(self, diff_text: str, rel_path: str) -> List[SymbolChange]:
         """Extract symbols mentioned in git diff hunk headers."""
@@ -92,6 +96,52 @@ class SymbolExtractor:
                             line_number=start_line,
                         )
                     )
+        return symbols
+
+    def extract_from_source_file(
+        self,
+        full_path: Path,
+        rel_path: str,
+        changed_lines: Set[int],
+    ) -> List[SymbolChange]:
+        """Use StructureEngine to extract symbols overlapping changed lines across supported languages."""
+        if not full_path.is_file():
+            return []
+
+        ext = full_path.suffix.lower()
+        if SupportedLanguage.from_extension(ext) == SupportedLanguage.UNSUPPORTED:
+            return []
+
+        overlapping = self.engine.get_overlapping_symbols(full_path, rel_path, changed_lines)
+        symbols: List[SymbolChange] = []
+        seen: Set[str] = set()
+
+        kind_map = {
+            SymbolKind.FUNCTION: SymbolType.FUNCTION,
+            SymbolKind.METHOD: SymbolType.METHOD,
+            SymbolKind.CLASS: SymbolType.CLASS,
+            SymbolKind.INTERFACE: SymbolType.TYPE,
+            SymbolKind.STRUCT: SymbolType.TYPE,
+            SymbolKind.TRAIT: SymbolType.TYPE,
+            SymbolKind.TYPE_ALIAS: SymbolType.TYPE,
+            SymbolKind.CONSTANT: SymbolType.CONSTANT,
+            SymbolKind.VARIABLE: SymbolType.VARIABLE,
+        }
+
+        for sym in overlapping:
+            if sym.name not in seen:
+                seen.add(sym.name)
+                sym_type = kind_map.get(sym.kind, SymbolType.FUNCTION)
+                change_type = "ADDED" if not changed_lines else "MODIFIED"
+                symbols.append(
+                    SymbolChange(
+                        name=sym.name,
+                        symbol_type=sym_type,
+                        file_path=rel_path,
+                        change_type=change_type,
+                        line_number=sym.line_start,
+                    )
+                )
         return symbols
 
     def parse_changed_line_numbers(self, patch: str) -> Set[int]:

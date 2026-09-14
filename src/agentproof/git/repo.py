@@ -283,11 +283,20 @@ class GitRepo:
             if snippet:
                 changed_symbols.extend(self._symbol_extractor.extract_from_diff_text(snippet, path))
 
-            # AST enrichment for Python files
-            if path.endswith(".py") and status != FileStatus.DELETED:
+            # AST enrichment for supported source files (Python, JS, TS, Go, Rust, Java)
+            file_lang = None
+            analysis_level = None
+            if status != FileStatus.DELETED:
                 full_p = self.root_dir / path
+                struct = self._symbol_extractor.engine.parse_file(full_p, path)
+                if struct:
+                    from agentproof.structure.models import SupportedLanguage
+                    if struct.language != SupportedLanguage.UNSUPPORTED:
+                        file_lang = struct.language.value
+                    analysis_level = struct.analysis_level.value
+
                 changed_lines = self._symbol_extractor.parse_changed_line_numbers(snippet or "") if snippet else set()
-                ast_symbols = self._symbol_extractor.extract_from_python_file(full_p, path, changed_lines)
+                ast_symbols = self._symbol_extractor.extract_from_source_file(full_p, path, changed_lines)
                 # Combine unique symbol names
                 existing_names = {s.name for s in changed_symbols}
                 for sym in ast_symbols:
@@ -309,6 +318,8 @@ class GitRepo:
                 unstaged_additions=u_adds,
                 unstaged_deletions=u_dels,
                 changed_symbols=changed_symbols,
+                language=file_lang,
+                analysis_level=analysis_level,
             )
             files_list.append(file_change)
 

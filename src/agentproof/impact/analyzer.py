@@ -14,6 +14,7 @@ from agentproof.core.models import (
     ImpactRelation,
     ImpactedComponent,
 )
+from agentproof.structure import StructureEngine
 
 # Directories to ignore during reference scanning
 IGNORED_DIRS = {
@@ -25,8 +26,9 @@ IGNORED_DIRS = {
 class ImpactAnalyzer:
     """Discovers components impacted by changed files and symbols."""
 
-    def __init__(self, root_dir: str | Path) -> None:
+    def __init__(self, root_dir: str | Path, engine: Optional[StructureEngine] = None) -> None:
         self.root_dir = Path(root_dir).resolve()
+        self.engine = engine or StructureEngine()
 
     def _get_project_files(self) -> List[Path]:
         """Collect searchable source and test files in repository."""
@@ -36,7 +38,7 @@ class ImpactAnalyzer:
             dirnames[:] = [d for d in dirnames if d not in IGNORED_DIRS and not d.startswith(".")]
             for f in filenames:
                 ext = os.path.splitext(f)[1].lower()
-                if ext in (".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs"):
+                if ext in (".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".java"):
                     full_p = Path(dirpath) / f
                     # Skip huge generated files > 1MB
                     try:
@@ -51,7 +53,7 @@ class ImpactAnalyzer:
         Analyze the repository to determine what components, callers,
         and tests are affected by the changes in summary.
         """
-        if summary.total_files == 0:
+        if summary.total_files == 0 and not summary.files:
             return ChangeImpact(
                 changed_modules=[],
                 impacted_source_files=[],
@@ -105,8 +107,10 @@ class ImpactAnalyzer:
                 "/tests/" in rel_p or rel_p.startswith("tests/")
                 or "/test/" in rel_p or rel_p.startswith("test/")
                 or "test_" in os.path.basename(rel_p)
+                or "_test." in os.path.basename(rel_p)
                 or ".test." in rel_p
                 or ".spec." in rel_p
+                or os.path.basename(rel_p).lower().endswith("test.java")
             )
 
             # Check naming pattern for test file matching (e.g. test_calc.py for calc.py)
@@ -125,7 +129,64 @@ class ImpactAnalyzer:
             if matched_by_name:
                 continue
 
-            # Read content to search for import / reference
+            # 3a. Check structural AST imports and call references first
+            fs = self.engine.analyze_file(full_p, rel_path=rel_p)
+            found_structural_match = False
+
+            # Check imports from AST
+            for imp in fs.imports:
+                for mod in changed_modules:
+                    if imp.module == mod or imp.module.endswith(f"/{mod}") or imp.module.endswith(f".{mod}") or any(sym in imp.imported_symbols for sym in target_tokens):
+                        caused_by = ", ".join(sorted(target_tokens.get(mod, {mod})))
+                        found_structural_match = True
+                        if is_test_file:
+                            if rel_p not in impacted_test_map:
+                                impacted_test_map[rel_p] = ImpactedComponent(
+                                    file_path=rel_p,
+                                    relation=ImpactRelation.TEST_FOR_MODULE,
+                                    impacted_by=caused_by,
+                                    description=f"Test imports module '{mod}'",
+                                )
+                        else:
+                            if rel_p not in impacted_source_map:
+                                impacted_source_map[rel_p] = ImpactedComponent(
+                                    file_path=rel_p,
+                                    relation=ImpactRelation.DIRECT_IMPORT,
+                                    impacted_by=caused_by,
+                                    description=f"Directly imports module '{mod}'",
+                                )
+                        break
+                if found_structural_match:
+                    break
+
+            # Check calls from AST
+            if not found_structural_match:
+                for ref in fs.references:
+                    if ref.symbol_name in target_tokens:
+                        caused_by = ", ".join(sorted(target_tokens[ref.symbol_name]))
+                        found_structural_match = True
+                        if is_test_file:
+                            if rel_p not in impacted_test_map:
+                                impacted_test_map[rel_p] = ImpactedComponent(
+                                    file_path=rel_p,
+                                    relation=ImpactRelation.TEST_FOR_MODULE,
+                                    impacted_by=caused_by,
+                                    description=f"Test calls symbol '{ref.symbol_name}'",
+                                )
+                        else:
+                            if rel_p not in impacted_source_map:
+                                impacted_source_map[rel_p] = ImpactedComponent(
+                                    file_path=rel_p,
+                                    relation=ImpactRelation.CALLER,
+                                    impacted_by=caused_by,
+                                    description=f"Calls changed symbol '{ref.symbol_name}'",
+                                )
+                        break
+
+            if found_structural_match:
+                continue
+
+            # 3b. Read content to search for import / reference via word boundaries
             try:
                 content = full_p.read_text(encoding="utf-8", errors="ignore")
             except Exception:
